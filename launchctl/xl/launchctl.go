@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -37,9 +38,35 @@ const (
 	PollingPeriod    = 10 * time.Millisecond
 	NumChannels      = 16
 	NumControls      = 6*8 + 4 + 4
+	NumLEDs          = 48
 )
 
-type Value uint8
+var (
+	Control_Knob_SendA                  = controlRange(0, 8)
+	Control_Knob_SendB                  = controlRange(8, 16)
+	Control_Knob_PanDevice              = controlRange(16, 24)
+	Control_Button_TrackFocus           = controlRange(24, 32)
+	Control_Button_TrackControl         = controlRange(32, 40)
+	Control_Button_Device       Control = 40
+	Control_Button_Mute         Control = 41
+	Control_Button_Solo         Control = 42
+	Control_Button_Record       Control = 43
+	Control_Button_Up           Control = 44
+	Control_Button_Down         Control = 45
+	Control_Button_Left         Control = 46
+	Control_Button_Right        Control = 47
+)
+
+type (
+	Value uint8
+
+	// Control indexes are assigned in the range [0, NumControls).
+	// They are ordered such that the control number equals the
+	// LED number for the first 48 controls.
+	Control int
+
+	Color byte
+)
 
 // LaunchControl represents a device with an input and output MIDI stream.
 type LaunchControl struct {
@@ -48,6 +75,10 @@ type LaunchControl struct {
 
 	lock sync.Mutex
 
+	// current display buffer, updates go to opposite
+	bufnum [NumChannels]int
+
+	color [NumChannels][NumControls]Color
 	value [NumChannels][NumControls]Value
 }
 
@@ -71,9 +102,16 @@ func Open() (*LaunchControl, error) {
 	for ch := 0; ch < NumChannels; ch++ {
 		for cc := 0; cc < NumControls; cc++ {
 			lc.value[ch][cc] = 128
+			lc.color[ch][cc] = 0xf // RRGG == Full Amber
 		}
 	}
 	return lc, nil
+}
+
+func (c Color) toByte() byte {
+	red := (byte(c) & 0xc) >> 2
+	green := byte(c) & 0x3
+	return red + green<<4
 }
 
 // Start begins listening for updates.
@@ -83,19 +121,57 @@ func (l *LaunchControl) Start(ctx context.Context) {
 	defer cancel()
 	ch := make(chan []portmidi.Event, ReadBufferDepth)
 
-	go func() {
-		l.Buffer(0, 0)
-		l.Reset(0, 0+1+1<<4)
-		l.Buffer(0, 1)
-		l.Reset(0, 0+0+0<<4)
-		for {
-			// @@@
-			time.Sleep(time.Second / 2)
-			l.Flash(0, true)
-			time.Sleep(time.Second / 2)
-			l.Flash(0, false)
+	for i := 0; i < NumChannels; i++ {
+		if err := l.Reset(i); err != nil {
+			log.Fatal("Error in reset", err)
 		}
+		l.SwapBuffers(i)
+	}
 
+	go func() {
+		// TODO Next, begin using the frame buffer and make
+		// SwapBuffer() automatically send the current buffer
+		// value, first.  Implement flashing option this way
+		// (but swap manually?).  Ask Novation if the duty
+		// cycle can be set?
+		colors := new([48]Color)
+
+		// l.SetAll(0, 3+0<<4)
+		// l.SwapBuffers(0)
+		// l.SetAll(0, 0+3<<4)
+
+		// // l.Flash(0, true)
+
+		// for j := 0; j < 10; j++ {
+		// 	// @@@
+		// 	time.Sleep(time.Second / 2)
+		// 	l.SwapBuffers(0)
+		// }
+
+		// l.Flash(0, true)
+		// time.Sleep(time.Second * 5)
+		// l.Flash(0, false)
+
+		//l.SwapBuffers(0)
+		colors[Control_Knob_SendA[1]] = 0xf
+		l.SetPixels(0, colors[:])
+		colors[Control_Knob_SendA[1]] = 0
+
+		l.SwapBuffers(0)
+		colors[Control_Button_Up] = 0xf
+		l.SetPixels(0, colors[:])
+		colors[Control_Button_Up] = 0
+
+		for {
+			for i := 0; i < NumLEDs; i++ {
+				// colors[i] = 0xf
+				// colors[(i+47)%48] = 0
+
+				// l.SetPixels(0, colors[:])
+				//l.SwapBuffers(0)
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
 	}()
 	go func() {
 		for {
@@ -137,68 +213,74 @@ func (l *LaunchControl) Start(ctx context.Context) {
 	}
 }
 
+func (l *LaunchControl) getControl(evt portmidi.Event) Control {
+	switch evt.Status & MIDI_Status_Code_Mask {
+	case MIDI_Status_Control_Change:
+		return l.getControlChangeIndex(Value(evt.Data1))
+	case MIDI_Status_Note_On, MIDI_Status_Note_Off:
+		return l.getNoteChangeIndex(Value(evt.Data1))
+	}
+	panic("Unhandled status byte")
+}
+
 func (l *LaunchControl) event(evt portmidi.Event) {
+	midiChannel := Value(evt.Status & MIDI_Channel_Mask)
+	control := l.getControl(evt)
+
 	l.lock.Lock()
 	defer l.lock.Unlock()
 
-	midiChannel := Value(evt.Status & MIDI_Channel_Mask)
-
-	switch evt.Status & MIDI_Status_Code_Mask {
-	case MIDI_Status_Control_Change:
-		//fmt.Println("CC Chan", midiChannel, evt.Data1, evt.Data2)
-		l.controlChange(midiChannel, Value(evt.Data1), Value(evt.Data2))
-	case MIDI_Status_Note_On, MIDI_Status_Note_Off:
-		//fmt.Println("CC Note", midiChannel, evt.Data1, evt.Data2)
-		l.noteChange(midiChannel, Value(evt.Data1), Value(evt.Data2))
-	}
-
+	l.value[midiChannel][control] = Value(evt.Data2)
 }
 
-func (l *LaunchControl) controlChange(midiChannel, data1, data2 Value) {
+func (l *LaunchControl) getControlChangeIndex(data Value) Control {
 	switch {
-	case 13 <= data1 && data1 <= 20: // 0ffset 0
-		l.value[midiChannel][data1-13+0] = data2
+	case 13 <= data && data <= 20: // 0ffset 0
+		return Control(data - 13 + 0)
 
-	case 29 <= data1 && data1 <= 36: // Offset 8
-		l.value[midiChannel][data1-29+8] = data2
+	case 29 <= data && data <= 36: // Offset 8
+		return Control(data - 29 + 8)
 
-	case 49 <= data1 && data1 <= 56: // Offset 16
-		l.value[midiChannel][data1-49+16] = data2
+	case 49 <= data && data <= 56: // Offset 16
+		return Control(data - 49 + 16)
 
-	case 77 <= data1 && data1 <= 84: // Offset 24
-		l.value[midiChannel][data1-77+24] = data2
+	case 104 <= data && data <= 107: // Offset 44
+		return Control(data - 104 + 44)
 
-	case 104 <= data1 && data1 <= 107: // Offset 48
-		l.value[midiChannel][data1-104+48] = data2
+	case 77 <= data && data <= 84: // Offset 48 -- Sliders w/o LEDs
+		return Control(data - 77 + 48)
 	}
+
+	return -1
 }
 
-func (l *LaunchControl) noteChange(midiChannel, data1, data2 Value) {
+func (l *LaunchControl) getNoteChangeIndex(data Value) Control {
 	switch {
-	case 41 <= data1 && data1 <= 44: // 0ffset 32
-		l.value[midiChannel][data1-41+32] = data2
+	case 41 <= data && data <= 44: // 0ffset 24
+		return Control(data - 41 + 24)
 
-	case 57 <= data1 && data1 <= 60: // Offset 36
-		l.value[midiChannel][data1-57+36] = data2
+	case 57 <= data && data <= 60: // Offset 28
+		return Control(data - 57 + 28)
 
-	case 73 <= data1 && data1 <= 76: // Offset 40
-		l.value[midiChannel][data1-73+40] = data2
+	case 73 <= data && data <= 76: // Offset 32
+		return Control(data - 73 + 32)
 
-	case 89 <= data1 && data1 <= 92: // Offset 44
-		l.value[midiChannel][data1-89+44] = data2
+	case 89 <= data && data <= 92: // Offset 36
+		return Control(data - 89 + 36)
 
-	case 105 <= data1 && data1 <= 108: // Offset 52
-		l.value[midiChannel][data1-105+52] = data2
+	case 105 <= data && data <= 108: // Offset 40
+		return Control(data - 105 + 40)
 	}
+
+	return -1
 }
 
-// Reset sends a "light all lights" SysEx command with color value.
-func (l *LaunchControl) Reset(tmpl, color int) error {
+func (l *LaunchControl) SetAll(midiChan int, color Color) error {
 
-	data := []byte{0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x78, byte(tmpl)}
+	data := []byte{0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x78, byte(midiChan)}
 
 	for i := 0; i < 48; i++ {
-		data = append(data, byte(i), byte(color))
+		data = append(data, byte(i), color.toByte())
 	}
 
 	data = append(data, 0xf7)
@@ -206,24 +288,54 @@ func (l *LaunchControl) Reset(tmpl, color int) error {
 	return l.outputStream.WriteSysExBytes(portmidi.Time(), data)
 }
 
-func (l *LaunchControl) Buffer(tmpl, b int) error {
-	var data int64
-	if b == 0 {
-		data = 0x21 + 0x8
-	} else {
-		data = 0x24 + 0x8
+func (l *LaunchControl) SetPixels(midiChan int, colors []Color) error {
+
+	data := []byte{0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x78, byte(midiChan)}
+
+	for i := 0; i < 48; i++ {
+		data = append(data, byte(i), colors[i].toByte())
 	}
-	return l.outputStream.WriteShort(0xb0+int64(tmpl), 0, data)
+
+	data = append(data, 0xf7)
+
+	return l.outputStream.WriteSysExBytes(portmidi.Time(), data)
 }
 
-func (l *LaunchControl) Flash(tmpl int, on bool) error {
-	var data int64
-	if on {
-		data = 0x28 // @@@
+func (l *LaunchControl) Reset(midiChan int) error {
+	return l.outputStream.WriteShort(0xb0+int64(midiChan), 0x00, 0x00)
+}
+
+func (l *LaunchControl) SwapBuffers(midiChan int) error {
+	l.lock.Lock()
+	l.bufnum[midiChan] = l.bufnum[midiChan] ^ 1
+	l.lock.Unlock()
+
+	var data Value
+	if l.bufnum[midiChan] == 0 {
+		data = 0x21
 	} else {
-		data = 0x20 // @@@
+		data = 0x24
 	}
-	return l.outputStream.WriteShort(0xb0+int64(tmpl), 0, data)
+
+	return l.outputStream.WriteShort(0xb0+int64(midiChan), 0, int64(data))
+}
+
+func (l *LaunchControl) Flash(midiChan int, on bool) error {
+	l.lock.Lock()
+	bn := l.bufnum[midiChan]
+	l.lock.Unlock()
+
+	var data Value
+	var flash Value
+	if on {
+		flash = 0x8
+	}
+	if bn == 0 {
+		data = 0x21 + flash
+	} else {
+		data = 0x24 + flash
+	}
+	return l.outputStream.WriteShort(0xb0+int64(midiChan), 0, int64(data))
 }
 
 func (l *LaunchControl) Close() error {
@@ -253,6 +365,13 @@ func discover() (input portmidi.DeviceID, output portmidi.DeviceID, err error) {
 	} else {
 		input = portmidi.DeviceID(in)
 		output = portmidi.DeviceID(out)
+	}
+	return
+}
+
+func controlRange(from, to Control) (r []Control) {
+	for c := from; c < to; c++ {
+		r = append(r, c)
 	}
 	return
 }
