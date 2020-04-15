@@ -102,10 +102,19 @@ func Open() (*LaunchControl, error) {
 	for ch := 0; ch < NumChannels; ch++ {
 		for cc := 0; cc < NumControls; cc++ {
 			lc.value[ch][cc] = 128
-			lc.color[ch][cc] = 0xf // RRGG == Full Amber
+			lc.color[ch][cc] = 0
 		}
 	}
 	return lc, nil
+}
+
+func (v Value) toFloat() float64 {
+	if v == 64 {
+		return 0.5
+	} else if v < 64 {
+		return float64(v) / 128.0
+	}
+	return float64(v) / 127.0
 }
 
 func (c Color) toByte() byte {
@@ -125,53 +134,33 @@ func (l *LaunchControl) Start(ctx context.Context) {
 		if err := l.Reset(i); err != nil {
 			log.Fatal("Error in reset", err)
 		}
+		// The first swap enables double buffering.
 		l.SwapBuffers(i)
 	}
 
 	go func() {
-		// TODO Next, begin using the frame buffer and make
-		// SwapBuffer() automatically send the current buffer
-		// value, first.  Implement flashing option this way
-		// (but swap manually?).  Ask Novation if the duty
-		// cycle can be set?
-		colors := new([48]Color)
 
-		// l.SetAll(0, 3+0<<4)
-		// l.SwapBuffers(0)
-		// l.SetAll(0, 0+3<<4)
-
-		// // l.Flash(0, true)
-
-		// for j := 0; j < 10; j++ {
-		// 	// @@@
-		// 	time.Sleep(time.Second / 2)
+		// i := 0
+		// for {
+		// 	i = (i + NumLEDs + 1) % NumLEDs
+		// 	l.color[0][i] = 0xf
 		// 	l.SwapBuffers(0)
+		// 	l.color[0][i] = 0
 		// }
 
-		// l.Flash(0, true)
-		// time.Sleep(time.Second * 5)
-		// l.Flash(0, false)
+		// for {
+		// 	for j := 0; j < NumLEDs; j++ {
+		// 		l.color[0][j] = Color(l.value[0][0] / 8)
+		// 	}
+		// 	l.SwapBuffers(0)
+		// 	time.Sleep(50 * time.Millisecond)
+		// }
 
-		//l.SwapBuffers(0)
-		colors[Control_Knob_SendA[1]] = 0xf
-		l.SetPixels(0, colors[:])
-		colors[Control_Knob_SendA[1]] = 0
-
-		l.SwapBuffers(0)
-		colors[Control_Button_Up] = 0xf
-		l.SetPixels(0, colors[:])
-		colors[Control_Button_Up] = 0
-
-		for {
-			for i := 0; i < NumLEDs; i++ {
-				// colors[i] = 0xf
-				// colors[(i+47)%48] = 0
-
-				// l.SetPixels(0, colors[:])
-				//l.SwapBuffers(0)
-				time.Sleep(100 * time.Millisecond)
-			}
+		for j := 0; j < 16; j++ {
+			l.color[0][Control_Button_TrackFocus[0]+Control(j)] = Color(j)
 		}
+		l.SwapBuffers(0)
+
 	}()
 	go func() {
 		for {
@@ -276,20 +265,14 @@ func (l *LaunchControl) getNoteChangeIndex(data Value) Control {
 }
 
 func (l *LaunchControl) SetAll(midiChan int, color Color) error {
-
-	data := []byte{0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x78, byte(midiChan)}
-
-	for i := 0; i < 48; i++ {
-		data = append(data, byte(i), color.toByte())
+	colors := make([]Color, NumLEDs)
+	for i := range colors {
+		colors[i] = color
 	}
-
-	data = append(data, 0xf7)
-
-	return l.outputStream.WriteSysExBytes(portmidi.Time(), data)
+	return l.SetPixels(midiChan, colors)
 }
 
 func (l *LaunchControl) SetPixels(midiChan int, colors []Color) error {
-
 	data := []byte{0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x78, byte(midiChan)}
 
 	for i := 0; i < 48; i++ {
@@ -307,11 +290,14 @@ func (l *LaunchControl) Reset(midiChan int) error {
 
 func (l *LaunchControl) SwapBuffers(midiChan int) error {
 	l.lock.Lock()
-	l.bufnum[midiChan] = l.bufnum[midiChan] ^ 1
-	l.lock.Unlock()
+	defer l.lock.Unlock()
+	bn := l.bufnum[midiChan]
+	l.bufnum[midiChan] = bn ^ 1
+
+	l.SetPixels(midiChan, l.color[midiChan][:])
 
 	var data Value
-	if l.bufnum[midiChan] == 0 {
+	if bn == 0 {
 		data = 0x21
 	} else {
 		data = 0x24
