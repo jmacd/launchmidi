@@ -39,22 +39,40 @@ const (
 	NumChannels      = 16
 	NumControls      = 6*8 + 4 + 4
 	NumLEDs          = 48
+
+	FlashPeriod = 433 * time.Millisecond
+
+	Value_Uninitialized = 128
+
+	Color_BrightRed    = 0xc
+	Color_BrightOrange = 0xd
+	Color_BrightYellow = 0xf
+	Color_BrightGreen  = 0x3
+
+	Color_DimRed    = 0x4
+	Color_DimOrange = 0x9
+	Color_DimYellow = 0x5
+	Color_DimGreen  = 0x1
+
+	Color_Flash                = 0x10
+	Color_FlashIfUninitialized = 0x20
+
+	Control_Button_Device Control = 40
+	Control_Button_Mute   Control = 41
+	Control_Button_Solo   Control = 42
+	Control_Button_Record Control = 43
+	Control_Button_Up     Control = 44
+	Control_Button_Down   Control = 45
+	Control_Button_Left   Control = 46
+	Control_Button_Right  Control = 47
 )
 
 var (
-	Control_Knob_SendA                  = controlRange(0, 8)
-	Control_Knob_SendB                  = controlRange(8, 16)
-	Control_Knob_PanDevice              = controlRange(16, 24)
-	Control_Button_TrackFocus           = controlRange(24, 32)
-	Control_Button_TrackControl         = controlRange(32, 40)
-	Control_Button_Device       Control = 40
-	Control_Button_Mute         Control = 41
-	Control_Button_Solo         Control = 42
-	Control_Button_Record       Control = 43
-	Control_Button_Up           Control = 44
-	Control_Button_Down         Control = 45
-	Control_Button_Left         Control = 46
-	Control_Button_Right        Control = 47
+	Control_Knob_SendA          = controlRange(0, 8)
+	Control_Knob_SendB          = controlRange(8, 16)
+	Control_Knob_PanDevice      = controlRange(16, 24)
+	Control_Button_TrackFocus   = controlRange(24, 32)
+	Control_Button_TrackControl = controlRange(32, 40)
 )
 
 type (
@@ -73,13 +91,14 @@ type LaunchControl struct {
 	inputStream  *portmidi.Stream
 	outputStream *portmidi.Stream
 
-	lock sync.Mutex
+	lock    sync.Mutex
+	flashes int64
 
-	// current display buffer, updates go to opposite
-	bufnum [NumChannels]int
+	// by MIDI channel:
 
-	color [NumChannels][NumControls]Color
-	value [NumChannels][NumControls]Value
+	swaps [NumChannels]int64              // number of swaps
+	color [NumChannels][NumControls]Color // colors [0-15] + 2 bits
+	value [NumChannels][NumControls]Value // control values [0-127] or uninitialized
 }
 
 // Open opens a connection to the XL and initializes an input and
@@ -108,6 +127,14 @@ func Open() (*LaunchControl, error) {
 	return lc, nil
 }
 
+func FlashUnknown(c Color) Color {
+	return c | Color_FlashIfUninitialized
+}
+
+func Flash(c Color) Color {
+	return c | Color_Flash
+}
+
 func (v Value) toFloat() float64 {
 	if v == 64 {
 		return 0.5
@@ -117,14 +144,23 @@ func (v Value) toFloat() float64 {
 	return float64(v) / 127.0
 }
 
-func (c Color) toByte() byte {
+func (c Color) toByte(flashOff bool, v Value) byte {
+	if flashOff && c&Color_Flash != 0 {
+		return 0
+	}
+	if flashOff && c&Color_FlashIfUninitialized != 0 {
+		if v == Value_Uninitialized {
+			return 0
+		}
+	}
 	red := (byte(c) & 0xc) >> 2
 	green := byte(c) & 0x3
 	return red + green<<4
 }
 
-// Start begins listening for updates.
-func (l *LaunchControl) Start(ctx context.Context) {
+// Run begins listening for updates, blocking the caller until the
+// context is canceled.
+func (l *LaunchControl) Run(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 
 	defer cancel()
@@ -156,9 +192,24 @@ func (l *LaunchControl) Start(ctx context.Context) {
 		// 	time.Sleep(50 * time.Millisecond)
 		// }
 
-		for j := 0; j < 16; j++ {
-			l.color[0][Control_Button_TrackFocus[0]+Control(j)] = Color(j)
-		}
+		// for j := 0; j < 16; j++ {
+		// 	l.color[0][Control_Button_TrackFocus[0]+Control(j)] = Color(j)
+		// }
+		// l.SwapBuffers(0)
+
+		l.color[0][Control_Button_TrackFocus[0]] = Color_BrightRed
+		l.color[0][Control_Button_TrackFocus[1]] = Flash(Color_BrightYellow)
+		l.color[0][Control_Button_TrackFocus[2]] = Flash(Color_BrightOrange)
+		l.color[0][Control_Button_TrackFocus[3]] = Color_BrightGreen
+
+		l.color[0][Control_Button_TrackControl[0]] = Color_DimRed
+		l.color[0][Control_Button_TrackControl[1]] = Flash(Color_DimYellow)
+		l.color[0][Control_Button_TrackControl[2]] = Flash(Color_DimOrange)
+		l.color[0][Control_Button_TrackControl[3]] = Color_DimGreen
+
+		l.color[0][Control_Knob_SendA[0]] = Flash(Color_BrightOrange)
+		l.color[0][Control_Knob_SendA[1]] = FlashUnknown(Color_BrightOrange)
+
 		l.SwapBuffers(0)
 
 	}()
@@ -193,6 +244,19 @@ func (l *LaunchControl) Start(ctx context.Context) {
 				for _, evt := range evts {
 					l.event(evt)
 				}
+			}
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(FlashPeriod)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				l.flash()
 			}
 		}
 	}()
@@ -236,7 +300,7 @@ func (l *LaunchControl) getControlChangeIndex(data Value) Control {
 	case 104 <= data && data <= 107: // Offset 44
 		return Control(data - 104 + 44)
 
-	case 77 <= data && data <= 84: // Offset 48 -- Sliders w/o LEDs
+	case 77 <= data && data <= 84: // Offset 48 -- Sliders are missing LEDs :sadface:
 		return Control(data - 77 + 48)
 	}
 
@@ -264,19 +328,13 @@ func (l *LaunchControl) getNoteChangeIndex(data Value) Control {
 	return -1
 }
 
-func (l *LaunchControl) SetAll(midiChan int, color Color) error {
-	colors := make([]Color, NumLEDs)
-	for i := range colors {
-		colors[i] = color
-	}
-	return l.SetPixels(midiChan, colors)
-}
-
-func (l *LaunchControl) SetPixels(midiChan int, colors []Color) error {
+func (l *LaunchControl) setPixels(midiChan int, colors []Color) error {
 	data := []byte{0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x78, byte(midiChan)}
 
+	flashing := l.flashes%2 == 1
+
 	for i := 0; i < 48; i++ {
-		data = append(data, byte(i), colors[i].toByte())
+		data = append(data, byte(i), colors[i].toByte(flashing, l.value[midiChan][i]))
 	}
 
 	data = append(data, 0xf7)
@@ -288,39 +346,29 @@ func (l *LaunchControl) Reset(midiChan int) error {
 	return l.outputStream.WriteShort(0xb0+int64(midiChan), 0x00, 0x00)
 }
 
+func (l *LaunchControl) flash() {
+	l.lock.Lock()
+	l.flashes++
+	l.lock.Unlock()
+
+	// TODO have a "current" channel, stop passing "midiChan" (?).
+	l.SwapBuffers(0)
+}
+
 func (l *LaunchControl) SwapBuffers(midiChan int) error {
 	l.lock.Lock()
-	defer l.lock.Unlock()
-	bn := l.bufnum[midiChan]
-	l.bufnum[midiChan] = bn ^ 1
-
-	l.SetPixels(midiChan, l.color[midiChan][:])
+	swapNum := l.swaps[midiChan]
+	l.swaps[midiChan]++
+	l.setPixels(midiChan, l.color[midiChan][:])
+	l.lock.Unlock()
 
 	var data Value
-	if bn == 0 {
+	if swapNum%2 == 0 {
 		data = 0x21
 	} else {
 		data = 0x24
 	}
 
-	return l.outputStream.WriteShort(0xb0+int64(midiChan), 0, int64(data))
-}
-
-func (l *LaunchControl) Flash(midiChan int, on bool) error {
-	l.lock.Lock()
-	bn := l.bufnum[midiChan]
-	l.lock.Unlock()
-
-	var data Value
-	var flash Value
-	if on {
-		flash = 0x8
-	}
-	if bn == 0 {
-		data = 0x21 + flash
-	} else {
-		data = 0x24 + flash
-	}
 	return l.outputStream.WriteShort(0xb0+int64(midiChan), 0, int64(data))
 }
 

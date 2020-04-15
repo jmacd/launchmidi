@@ -16,7 +16,7 @@ func main() {
 
 	ctx := context.Background()
 
-	ctl.Start(ctx)
+	ctl.Run(ctx)
 
 	// 	for {
 	// 		if err := ctl.Buffer(0, 0); err != nil {
