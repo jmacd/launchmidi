@@ -16,9 +16,11 @@
 package xl
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -37,18 +39,70 @@ const (
 	PollingPeriod    = 10 * time.Millisecond
 	NumChannels      = 16
 	NumControls      = 6*8 + 4 + 4
+	NumLEDs          = 48
+
+	FlashPeriod = 433 * time.Millisecond
+
+	Value_Uninitialized Value = 128
+
+	Color_BrightRed    Color = 0xc
+	Color_BrightOrange Color = 0xd
+	Color_BrightYellow Color = 0xf
+	Color_BrightGreen  Color = 0x3
+
+	Color_DimRed    Color = 0x4
+	Color_DimOrange Color = 0x9
+	Color_DimYellow Color = 0x5
+	Color_DimGreen  Color = 0x1
+
+	Color_Flash                Color = 0x10
+	Color_FlashIfUninitialized Color = 0x20
+
+	Control_Button_Device Control = 40
+	Control_Button_Mute   Control = 41
+	Control_Button_Solo   Control = 42
+	Control_Button_Record Control = 43
+	Control_Button_Up     Control = 44
+	Control_Button_Down   Control = 45
+	Control_Button_Left   Control = 46
+	Control_Button_Right  Control = 47
+
+	Control_Invalid Control = NumControls
 )
 
-type Value uint8
+var (
+	Control_Knob_SendA          = controlRange(0, 8)
+	Control_Knob_SendB          = controlRange(8, 16)
+	Control_Knob_PanDevice      = controlRange(16, 24)
+	Control_Button_TrackFocus   = controlRange(24, 32)
+	Control_Button_TrackControl = controlRange(32, 40)
+)
+
+type (
+	Value uint8
+
+	// Control indexes are assigned in the range [0, NumControls).
+	// They are ordered such that the control number equals the
+	// LED number for the first 48 controls.
+	Control int
+
+	Color byte
+)
 
 // LaunchControl represents a device with an input and output MIDI stream.
 type LaunchControl struct {
 	inputStream  *portmidi.Stream
 	outputStream *portmidi.Stream
 
-	lock sync.Mutex
+	lock    sync.Mutex
+	flashes int64
 
-	value [NumChannels][NumControls]Value
+	currentChannel int
+	// by MIDI channel:
+
+	swaps [NumChannels]int64              // number of swaps
+	color [NumChannels][NumControls]Color // colors [0-15] + 2 bits
+	value [NumChannels][NumControls]Value // control values [0-127] or uninitialized
 }
 
 // Open opens a connection to the XL and initializes an input and
@@ -70,31 +124,102 @@ func Open() (*LaunchControl, error) {
 	lc := &LaunchControl{inputStream: inStream, outputStream: outStream}
 	for ch := 0; ch < NumChannels; ch++ {
 		for cc := 0; cc < NumControls; cc++ {
-			lc.value[ch][cc] = 128
+			lc.value[ch][cc] = Value_Uninitialized
 		}
 	}
 	return lc, nil
 }
 
-// Start begins listening for updates.
-func (l *LaunchControl) Start(ctx context.Context) {
+func FlashUnknown(c Color) Color {
+	return c | Color_FlashIfUninitialized
+}
+
+func Flash(c Color) Color {
+	return c | Color_Flash
+}
+
+func (v Value) toFloat() float64 {
+	if v == 64 {
+		return 0.5
+	} else if v < 64 {
+		return float64(v) / 128.0
+	}
+	return float64(v) / 127.0
+}
+
+func (c Color) toByte(flashOff bool, v Value) byte {
+	if flashOff && c&Color_Flash != 0 {
+		return 0
+	}
+	if flashOff && c&Color_FlashIfUninitialized != 0 {
+		if v == Value_Uninitialized {
+			return 0
+		}
+	}
+	red := (byte(c) & 0xc) >> 2
+	green := byte(c) & 0x3
+	return red + green<<4
+}
+
+func (l *LaunchControl) SetColor(midiChan int, ctrl Control, color Color) {
+	l.lock.Lock()
+	l.color[midiChan][ctrl] = color
+	l.lock.Unlock()
+}
+
+// Run begins listening for updates, blocking the caller until the
+// context is canceled.
+func (l *LaunchControl) Run(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 
 	defer cancel()
 	ch := make(chan []portmidi.Event, ReadBufferDepth)
 
-	go func() {
-		l.Buffer(0, 0)
-		l.Reset(0, 0+1+1<<4)
-		l.Buffer(0, 1)
-		l.Reset(0, 0+0+0<<4)
-		for {
-			// @@@
-			time.Sleep(time.Second / 2)
-			l.Flash(0, true)
-			time.Sleep(time.Second / 2)
-			l.Flash(0, false)
+	for i := 0; i < NumChannels; i++ {
+		if err := l.Reset(i); err != nil {
+			log.Fatal("Error in reset", err)
 		}
+		// The first swap enables double buffering.
+		l.SwapBuffers(i)
+	}
+
+	go func() {
+
+		// i := 0
+		// for {
+		// 	i = (i + NumLEDs + 1) % NumLEDs
+		// 	l.color[0][i] = 0xf
+		// 	l.SwapBuffers(0)
+		// 	l.color[0][i] = 0
+		// }
+
+		// for {
+		// 	for j := 0; j < NumLEDs; j++ {
+		// 		l.color[0][j] = Color(l.value[0][0] / 8)
+		// 	}
+		// 	l.SwapBuffers(0)
+		// 	time.Sleep(50 * time.Millisecond)
+		// }
+
+		// for j := 0; j < 16; j++ {
+		// 	l.color[0][Control_Button_TrackFocus[0]+Control(j)] = Color(j)
+		// }
+		// l.SwapBuffers(0)
+
+		l.SetColor(0, Control_Button_TrackFocus[0], Color_BrightRed)
+		l.SetColor(0, Control_Button_TrackFocus[1], Flash(Color_BrightYellow))
+		l.SetColor(0, Control_Button_TrackFocus[2], Flash(Color_BrightOrange))
+		l.SetColor(0, Control_Button_TrackFocus[3], Color_BrightGreen)
+
+		l.SetColor(0, Control_Button_TrackControl[0], Color_DimRed)
+		l.SetColor(0, Control_Button_TrackControl[1], Flash(Color_DimYellow))
+		l.SetColor(0, Control_Button_TrackControl[2], Flash(Color_DimOrange))
+		l.SetColor(0, Control_Button_TrackControl[3], Color_DimGreen)
+
+		l.SetColor(0, Control_Knob_SendA[0], Flash(Color_BrightOrange))
+		l.SetColor(0, Control_Knob_SendA[1], FlashUnknown(Color_BrightOrange))
+
+		l.SwapBuffers(0)
 
 	}()
 	go func() {
@@ -131,99 +256,152 @@ func (l *LaunchControl) Start(ctx context.Context) {
 			}
 		}
 	}()
+	go func() {
+		ticker := time.NewTicker(FlashPeriod)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				l.flash()
+			}
+		}
+	}()
 
 	select {
 	case <-ctx.Done():
 	}
 }
 
+func (l *LaunchControl) getControl(evt portmidi.Event) Control {
+	switch evt.Status & MIDI_Status_Code_Mask {
+	case MIDI_Status_Control_Change:
+		return l.getControlChangeIndex(Value(evt.Data1))
+	case MIDI_Status_Note_On, MIDI_Status_Note_Off:
+		return l.getNoteChangeIndex(Value(evt.Data1))
+	default:
+		return Control_Invalid
+	}
+}
+
 func (l *LaunchControl) event(evt portmidi.Event) {
+	if len(evt.SysEx) != 0 {
+		l.sysexEvent(evt)
+		return
+	}
+
+	midiChannel := Value(evt.Status & MIDI_Channel_Mask)
+	control := l.getControl(evt)
+	if control == Control_Invalid {
+		return
+	}
+
 	l.lock.Lock()
 	defer l.lock.Unlock()
 
-	midiChannel := Value(evt.Status & MIDI_Channel_Mask)
-
-	switch evt.Status & MIDI_Status_Code_Mask {
-	case MIDI_Status_Control_Change:
-		//fmt.Println("CC Chan", midiChannel, evt.Data1, evt.Data2)
-		l.controlChange(midiChannel, Value(evt.Data1), Value(evt.Data2))
-	case MIDI_Status_Note_On, MIDI_Status_Note_Off:
-		//fmt.Println("CC Note", midiChannel, evt.Data1, evt.Data2)
-		l.noteChange(midiChannel, Value(evt.Data1), Value(evt.Data2))
-	}
-
+	l.value[midiChannel][control] = Value(evt.Data2)
 }
 
-func (l *LaunchControl) controlChange(midiChannel, data1, data2 Value) {
+func (l *LaunchControl) sysexEvent(evt portmidi.Event) {
+	sb := evt.SysEx
+	if len(sb) != 9 {
+		return
+	}
+
+	if bytes.Compare(sb[1:7], []byte{0x0, 0x20, 0x29, 0x2, 0x11, 0x77}) != 0 {
+		return
+	}
+
+	// "Template changed" is the only documented SysEx from the device.
+	l.lock.Lock()
+	l.currentChannel = int(sb[7])
+	l.lock.Unlock()
+}
+
+func (l *LaunchControl) getControlChangeIndex(data Value) Control {
 	switch {
-	case 13 <= data1 && data1 <= 20: // 0ffset 0
-		l.value[midiChannel][data1-13+0] = data2
+	case 13 <= data && data <= 20: // 0ffset 0
+		return Control(data - 13 + 0)
 
-	case 29 <= data1 && data1 <= 36: // Offset 8
-		l.value[midiChannel][data1-29+8] = data2
+	case 29 <= data && data <= 36: // Offset 8
+		return Control(data - 29 + 8)
 
-	case 49 <= data1 && data1 <= 56: // Offset 16
-		l.value[midiChannel][data1-49+16] = data2
+	case 49 <= data && data <= 56: // Offset 16
+		return Control(data - 49 + 16)
 
-	case 77 <= data1 && data1 <= 84: // Offset 24
-		l.value[midiChannel][data1-77+24] = data2
+	case 104 <= data && data <= 107: // Offset 44
+		return Control(data - 104 + 44)
 
-	case 104 <= data1 && data1 <= 107: // Offset 48
-		l.value[midiChannel][data1-104+48] = data2
+	case 77 <= data && data <= 84: // Offset 48 -- Sliders are missing LEDs :sadface:
+		return Control(data - 77 + 48)
 	}
+
+	return -1
 }
 
-func (l *LaunchControl) noteChange(midiChannel, data1, data2 Value) {
+func (l *LaunchControl) getNoteChangeIndex(data Value) Control {
 	switch {
-	case 41 <= data1 && data1 <= 44: // 0ffset 32
-		l.value[midiChannel][data1-41+32] = data2
+	case 41 <= data && data <= 44: // 0ffset 24
+		return Control(data - 41 + 24)
 
-	case 57 <= data1 && data1 <= 60: // Offset 36
-		l.value[midiChannel][data1-57+36] = data2
+	case 57 <= data && data <= 60: // Offset 28
+		return Control(data - 57 + 28)
 
-	case 73 <= data1 && data1 <= 76: // Offset 40
-		l.value[midiChannel][data1-73+40] = data2
+	case 73 <= data && data <= 76: // Offset 32
+		return Control(data - 73 + 32)
 
-	case 89 <= data1 && data1 <= 92: // Offset 44
-		l.value[midiChannel][data1-89+44] = data2
+	case 89 <= data && data <= 92: // Offset 36
+		return Control(data - 89 + 36)
 
-	case 105 <= data1 && data1 <= 108: // Offset 52
-		l.value[midiChannel][data1-105+52] = data2
+	case 105 <= data && data <= 108: // Offset 40
+		return Control(data - 105 + 40)
 	}
+
+	return -1
 }
 
-// Reset sends a "light all lights" SysEx command with color value.
-func (l *LaunchControl) Reset(tmpl, color int) error {
+func (l *LaunchControl) setPixels(midiChan int, colors []Color) error {
+	flashing := l.flashes%2 == 1
 
-	data := []byte{0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x78, byte(tmpl)}
-
+	data := make([]byte, 0, 60)
+	data = append(data, 0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x78, byte(midiChan))
 	for i := 0; i < 48; i++ {
-		data = append(data, byte(i), byte(color))
+		data = append(data, byte(i), colors[i].toByte(flashing, l.value[midiChan][i]))
 	}
-
 	data = append(data, 0xf7)
-
 	return l.outputStream.WriteSysExBytes(portmidi.Time(), data)
 }
 
-func (l *LaunchControl) Buffer(tmpl, b int) error {
-	var data int64
-	if b == 0 {
-		data = 0x21 + 0x8
-	} else {
-		data = 0x24 + 0x8
-	}
-	return l.outputStream.WriteShort(0xb0+int64(tmpl), 0, data)
+func (l *LaunchControl) Reset(midiChan int) error {
+	return l.outputStream.WriteShort(0xb0+int64(midiChan), 0x00, 0x00)
 }
 
-func (l *LaunchControl) Flash(tmpl int, on bool) error {
-	var data int64
-	if on {
-		data = 0x28 // @@@
+func (l *LaunchControl) flash() {
+	l.lock.Lock()
+	l.flashes++
+	l.lock.Unlock()
+
+	// TODO have a "current" channel, stop passing "midiChan" (?).
+	l.SwapBuffers(0)
+}
+
+func (l *LaunchControl) SwapBuffers(midiChan int) error {
+	l.lock.Lock()
+	swapNum := l.swaps[midiChan]
+	l.swaps[midiChan]++
+	l.setPixels(midiChan, l.color[midiChan][:])
+	l.lock.Unlock()
+
+	var data Value
+	if swapNum%2 == 0 {
+		data = 0x21
 	} else {
-		data = 0x20 // @@@
+		data = 0x24
 	}
-	return l.outputStream.WriteShort(0xb0+int64(tmpl), 0, data)
+
+	return l.outputStream.WriteShort(0xb0+int64(midiChan), 0, int64(data))
 }
 
 func (l *LaunchControl) Close() error {
@@ -253,6 +431,13 @@ func discover() (input portmidi.DeviceID, output portmidi.DeviceID, err error) {
 	} else {
 		input = portmidi.DeviceID(in)
 		output = portmidi.DeviceID(out)
+	}
+	return
+}
+
+func controlRange(from, to Control) (r []Control) {
+	for c := from; c < to; c++ {
+		r = append(r, c)
 	}
 	return
 }
