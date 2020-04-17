@@ -16,6 +16,7 @@
 package xl
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -42,20 +43,20 @@ const (
 
 	FlashPeriod = 433 * time.Millisecond
 
-	Value_Uninitialized = 128
+	Value_Uninitialized Value = 128
 
-	Color_BrightRed    = 0xc
-	Color_BrightOrange = 0xd
-	Color_BrightYellow = 0xf
-	Color_BrightGreen  = 0x3
+	Color_BrightRed    Color = 0xc
+	Color_BrightOrange Color = 0xd
+	Color_BrightYellow Color = 0xf
+	Color_BrightGreen  Color = 0x3
 
-	Color_DimRed    = 0x4
-	Color_DimOrange = 0x9
-	Color_DimYellow = 0x5
-	Color_DimGreen  = 0x1
+	Color_DimRed    Color = 0x4
+	Color_DimOrange Color = 0x9
+	Color_DimYellow Color = 0x5
+	Color_DimGreen  Color = 0x1
 
-	Color_Flash                = 0x10
-	Color_FlashIfUninitialized = 0x20
+	Color_Flash                Color = 0x10
+	Color_FlashIfUninitialized Color = 0x20
 
 	Control_Button_Device Control = 40
 	Control_Button_Mute   Control = 41
@@ -65,6 +66,8 @@ const (
 	Control_Button_Down   Control = 45
 	Control_Button_Left   Control = 46
 	Control_Button_Right  Control = 47
+
+	Control_Invalid Control = NumControls
 )
 
 var (
@@ -94,6 +97,7 @@ type LaunchControl struct {
 	lock    sync.Mutex
 	flashes int64
 
+	currentChannel int
 	// by MIDI channel:
 
 	swaps [NumChannels]int64              // number of swaps
@@ -120,8 +124,7 @@ func Open() (*LaunchControl, error) {
 	lc := &LaunchControl{inputStream: inStream, outputStream: outStream}
 	for ch := 0; ch < NumChannels; ch++ {
 		for cc := 0; cc < NumControls; cc++ {
-			lc.value[ch][cc] = 128
-			lc.color[ch][cc] = 0
+			lc.value[ch][cc] = Value_Uninitialized
 		}
 	}
 	return lc, nil
@@ -156,6 +159,12 @@ func (c Color) toByte(flashOff bool, v Value) byte {
 	red := (byte(c) & 0xc) >> 2
 	green := byte(c) & 0x3
 	return red + green<<4
+}
+
+func (l *LaunchControl) SetColor(midiChan int, ctrl Control, color Color) {
+	l.lock.Lock()
+	l.color[midiChan][ctrl] = color
+	l.lock.Unlock()
 }
 
 // Run begins listening for updates, blocking the caller until the
@@ -197,18 +206,18 @@ func (l *LaunchControl) Run(ctx context.Context) {
 		// }
 		// l.SwapBuffers(0)
 
-		l.color[0][Control_Button_TrackFocus[0]] = Color_BrightRed
-		l.color[0][Control_Button_TrackFocus[1]] = Flash(Color_BrightYellow)
-		l.color[0][Control_Button_TrackFocus[2]] = Flash(Color_BrightOrange)
-		l.color[0][Control_Button_TrackFocus[3]] = Color_BrightGreen
+		l.SetColor(0, Control_Button_TrackFocus[0], Color_BrightRed)
+		l.SetColor(0, Control_Button_TrackFocus[1], Flash(Color_BrightYellow))
+		l.SetColor(0, Control_Button_TrackFocus[2], Flash(Color_BrightOrange))
+		l.SetColor(0, Control_Button_TrackFocus[3], Color_BrightGreen)
 
-		l.color[0][Control_Button_TrackControl[0]] = Color_DimRed
-		l.color[0][Control_Button_TrackControl[1]] = Flash(Color_DimYellow)
-		l.color[0][Control_Button_TrackControl[2]] = Flash(Color_DimOrange)
-		l.color[0][Control_Button_TrackControl[3]] = Color_DimGreen
+		l.SetColor(0, Control_Button_TrackControl[0], Color_DimRed)
+		l.SetColor(0, Control_Button_TrackControl[1], Flash(Color_DimYellow))
+		l.SetColor(0, Control_Button_TrackControl[2], Flash(Color_DimOrange))
+		l.SetColor(0, Control_Button_TrackControl[3], Color_DimGreen)
 
-		l.color[0][Control_Knob_SendA[0]] = Flash(Color_BrightOrange)
-		l.color[0][Control_Knob_SendA[1]] = FlashUnknown(Color_BrightOrange)
+		l.SetColor(0, Control_Knob_SendA[0], Flash(Color_BrightOrange))
+		l.SetColor(0, Control_Knob_SendA[1], FlashUnknown(Color_BrightOrange))
 
 		l.SwapBuffers(0)
 
@@ -272,18 +281,43 @@ func (l *LaunchControl) getControl(evt portmidi.Event) Control {
 		return l.getControlChangeIndex(Value(evt.Data1))
 	case MIDI_Status_Note_On, MIDI_Status_Note_Off:
 		return l.getNoteChangeIndex(Value(evt.Data1))
+	default:
+		return Control_Invalid
 	}
-	panic("Unhandled status byte")
 }
 
 func (l *LaunchControl) event(evt portmidi.Event) {
+	if len(evt.SysEx) != 0 {
+		l.sysexEvent(evt)
+		return
+	}
+
 	midiChannel := Value(evt.Status & MIDI_Channel_Mask)
 	control := l.getControl(evt)
+	if control == Control_Invalid {
+		return
+	}
 
 	l.lock.Lock()
 	defer l.lock.Unlock()
 
 	l.value[midiChannel][control] = Value(evt.Data2)
+}
+
+func (l *LaunchControl) sysexEvent(evt portmidi.Event) {
+	sb := evt.SysEx
+	if len(sb) != 9 {
+		return
+	}
+
+	if bytes.Compare(sb[1:7], []byte{0x0, 0x20, 0x29, 0x2, 0x11, 0x77}) != 0 {
+		return
+	}
+
+	// "Template changed" is the only documented SysEx from the device.
+	l.lock.Lock()
+	l.currentChannel = int(sb[7])
+	l.lock.Unlock()
 }
 
 func (l *LaunchControl) getControlChangeIndex(data Value) Control {
@@ -329,16 +363,14 @@ func (l *LaunchControl) getNoteChangeIndex(data Value) Control {
 }
 
 func (l *LaunchControl) setPixels(midiChan int, colors []Color) error {
-	data := []byte{0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x78, byte(midiChan)}
-
 	flashing := l.flashes%2 == 1
 
+	data := make([]byte, 0, 60)
+	data = append(data, 0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x78, byte(midiChan))
 	for i := 0; i < 48; i++ {
 		data = append(data, byte(i), colors[i].toByte(flashing, l.value[midiChan][i]))
 	}
-
 	data = append(data, 0xf7)
-
 	return l.outputStream.WriteSysExBytes(portmidi.Time(), data)
 }
 
