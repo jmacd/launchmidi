@@ -15,6 +15,19 @@ const (
 	ColorFlashIfUninitialized Color = 0x20
 )
 
+var (
+	EightColors = []Color{
+		ColorBrightRed,
+		ColorBrightOrange,
+		ColorBrightYellow,
+		ColorBrightGreen,
+		ColorDimRed,
+		ColorDimOrange,
+		ColorDimYellow,
+		ColorDimGreen,
+	}
+)
+
 func Flash(c Color) Color {
 	return c | ColorFlash
 }
