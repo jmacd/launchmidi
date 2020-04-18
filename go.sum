@@ -1,2 +1,2 @@
-github.com/rakyll/portmidi v0.0.0-20191102002215-74e95e8bc9b1 h1:ayxM9WkC6QRX0QnfrbZa98pfFqrNq1jo+58rWL1qjZs=
-github.com/rakyll/portmidi v0.0.0-20191102002215-74e95e8bc9b1/go.mod h1:xKffaBd7e1YUoLpR2azvJqkxEdUDNGNDMlsUNdv6Bcs=
+github.com/jmacd/portmidi v0.0.0-20200418035943-004a8865e540 h1:0tQyKV0rUu5G7O7WWyf5JDiTdmfVDx/onbvGCLGnRSg=
+github.com/jmacd/portmidi v0.0.0-20200418035943-004a8865e540/go.mod h1:2605f12zrBibGnyoURK2B1YScgK4yvlTMMsJ58ecMJ4=

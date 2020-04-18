@@ -16,93 +16,87 @@
 package xl
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
 	"github.com/rakyll/portmidi"
 )
 
-const (
-	MIDI_Status_Note_Off       = 0x80
-	MIDI_Status_Note_On        = 0x90
-	MIDI_Status_Control_Change = 0xb0
-	MIDI_Status_Code_Mask      = 0xf0
-	MIDI_Channel_Mask          = 0x0f
-
-	MaxEventsPerPoll = 1024
-	ReadBufferDepth  = 16
-	PollingPeriod    = 10 * time.Millisecond
-	NumChannels      = 16
-	NumControls      = 6*8 + 4 + 4
-	NumLEDs          = 48
-
-	FlashPeriod = 433 * time.Millisecond
-
-	Value_Uninitialized Value = 128
-
-	Color_BrightRed    Color = 0xc
-	Color_BrightOrange Color = 0xd
-	Color_BrightYellow Color = 0xf
-	Color_BrightGreen  Color = 0x3
-
-	Color_DimRed    Color = 0x4
-	Color_DimOrange Color = 0x9
-	Color_DimYellow Color = 0x5
-	Color_DimGreen  Color = 0x1
-
-	Color_Flash                Color = 0x10
-	Color_FlashIfUninitialized Color = 0x20
-
-	Control_Button_Device Control = 40
-	Control_Button_Mute   Control = 41
-	Control_Button_Solo   Control = 42
-	Control_Button_Record Control = 43
-	Control_Button_Up     Control = 44
-	Control_Button_Down   Control = 45
-	Control_Button_Left   Control = 46
-	Control_Button_Right  Control = 47
-
-	Control_Invalid Control = NumControls
-)
-
-var (
-	Control_Knob_SendA          = controlRange(0, 8)
-	Control_Knob_SendB          = controlRange(8, 16)
-	Control_Knob_PanDevice      = controlRange(16, 24)
-	Control_Button_TrackFocus   = controlRange(24, 32)
-	Control_Button_TrackControl = controlRange(32, 40)
-)
-
 type (
+	// LaunchControl represents a device with an input and output MIDI stream.
+	LaunchControl struct {
+		inputStream  *portmidi.Stream
+		outputStream *portmidi.Stream
+
+		lock           sync.Mutex
+		flashes        int64
+		currentChannel int
+		errorChan      chan error
+
+		swaps [NumChannels]int64              // number of swaps
+		color [NumChannels][NumControls]Color // colors [0-15] + 2 bits
+		value [NumChannels][NumControls]Value // control values [0-127] or uninitialized
+
+		// calls has an additional entry representing AllChannels.
+		calls [NumChannels + 1][NumControls][]Callback
+	}
+
+	// Value is the value of any of the Control variables, in the range 0-127.
+	// The special value `ValueUninitialized` (128) is used to represent the
+	// initially unknown state of the Control.  Additional color bits
+	// `ColorFlash` (and `ColorFlashIfUninitialized`) support flashing (when
+	// uninitialized).
 	Value uint8
+
+	// Color is 4 bits of color information.
+	Color byte
 
 	// Control indexes are assigned in the range [0, NumControls).
 	// They are ordered such that the control number equals the
 	// LED number for the first 48 controls.
 	Control int
 
-	Color byte
+	// Callback is called when Control values change.  Register with SetCallback.
+	Callback func(midiChan int, control Control, value Value)
 )
 
-// LaunchControl represents a device with an input and output MIDI stream.
-type LaunchControl struct {
-	inputStream  *portmidi.Stream
-	outputStream *portmidi.Stream
+const (
+	DeviceName = "Launch Control XL"
 
-	lock    sync.Mutex
-	flashes int64
+	NumChannels = 16 // a.k.a "templates", 8 user and 8 factory settings
+	NumControls = 56 // (3+1+2)*8 rows of knobs, sliders, buttons + 2*4 side buttons
+	NumLEDs     = 48 // all except the sliders
 
-	currentChannel int
-	// by MIDI channel:
+	ValueUninitialized Value = 128
 
-	swaps [NumChannels]int64              // number of swaps
-	color [NumChannels][NumControls]Color // colors [0-15] + 2 bits
-	value [NumChannels][NumControls]Value // control values [0-127] or uninitialized
+	AllChannels = NumChannels // Use with AddCallback.
+
+	FlashPeriod      = 433 * time.Millisecond
+	MaxEventsPerPoll = 1024
+	PollingPeriod    = 10 * time.Millisecond
+	ReadBufferDepth  = 16
+)
+
+var (
+	ErrNoLaunchControl = fmt.Errorf("launchctl: no launch control xl is connected")
+)
+
+// toFloat ensures that the xl's knob indents at Value 64 return 0.5.
+func (v Value) Float() float64 {
+	switch {
+	case v == 0:
+		return 0
+	case v == 64:
+		return 0.5
+	case v == 127:
+		return 1
+	case v < 64:
+		return float64(v) / 128
+	default:
+		return float64(v-1) / 126
+	}
 }
 
 // Open opens a connection to the XL and initializes an input and
@@ -115,128 +109,72 @@ func Open() (*LaunchControl, error) {
 	}
 
 	var inStream, outStream *portmidi.Stream
-	if inStream, err = portmidi.NewInputStream(input, 1024); err != nil {
+	if inStream, err = portmidi.NewInputStream(input, MaxEventsPerPoll); err != nil {
 		return nil, err
 	}
-	if outStream, err = portmidi.NewOutputStream(output, 1024, 0); err != nil {
+	if outStream, err = portmidi.NewOutputStream(output, MaxEventsPerPoll, 0); err != nil {
 		return nil, err
 	}
-	lc := &LaunchControl{inputStream: inStream, outputStream: outStream}
+	lc := &LaunchControl{
+		inputStream:  inStream,
+		outputStream: outStream,
+		errorChan:    make(chan error, 1),
+	}
 	for ch := 0; ch < NumChannels; ch++ {
 		for cc := 0; cc < NumControls; cc++ {
-			lc.value[ch][cc] = Value_Uninitialized
+			lc.value[ch][cc] = ValueUninitialized
 		}
 	}
 	return lc, nil
 }
 
-func FlashUnknown(c Color) Color {
-	return c | Color_FlashIfUninitialized
-}
-
-func Flash(c Color) Color {
-	return c | Color_Flash
-}
-
-func (v Value) toFloat() float64 {
-	if v == 64 {
-		return 0.5
-	} else if v < 64 {
-		return float64(v) / 128.0
-	}
-	return float64(v) / 127.0
-}
-
-func (c Color) toByte(flashOff bool, v Value) byte {
-	if flashOff && c&Color_Flash != 0 {
-		return 0
-	}
-	if flashOff && c&Color_FlashIfUninitialized != 0 {
-		if v == Value_Uninitialized {
-			return 0
-		}
-	}
-	red := (byte(c) & 0xc) >> 2
-	green := byte(c) & 0x3
-	return red + green<<4
-}
-
-func (l *LaunchControl) SetColor(midiChan int, ctrl Control, color Color) {
+func (l *LaunchControl) AddCallback(midiChan int, control Control, callback Callback) {
 	l.lock.Lock()
-	l.color[midiChan][ctrl] = color
-	l.lock.Unlock()
+	defer l.lock.Unlock()
+
+	l.calls[midiChan][control] = append(l.calls[midiChan][control], callback)
 }
 
 // Run begins listening for updates, blocking the caller until the
 // context is canceled.
-func (l *LaunchControl) Run(ctx context.Context) {
+func (l *LaunchControl) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 
 	defer cancel()
 	ch := make(chan []portmidi.Event, ReadBufferDepth)
+	wg := sync.WaitGroup{}
+	wg.Add(3) // event reader, event processor, flasher routines
 
 	for i := 0; i < NumChannels; i++ {
 		if err := l.Reset(i); err != nil {
-			log.Fatal("Error in reset", err)
+			return err
 		}
 		// The first swap enables double buffering.
-		l.SwapBuffers(i)
+		if err := l.SwapBuffers(i); err != nil {
+			return err
+		}
+	}
+
+	if err := l.SetTemplate(0); err != nil {
+		return err
 	}
 
 	go func() {
-
-		// i := 0
-		// for {
-		// 	i = (i + NumLEDs + 1) % NumLEDs
-		// 	l.color[0][i] = 0xf
-		// 	l.SwapBuffers(0)
-		// 	l.color[0][i] = 0
-		// }
-
-		// for {
-		// 	for j := 0; j < NumLEDs; j++ {
-		// 		l.color[0][j] = Color(l.value[0][0] / 8)
-		// 	}
-		// 	l.SwapBuffers(0)
-		// 	time.Sleep(50 * time.Millisecond)
-		// }
-
-		// for j := 0; j < 16; j++ {
-		// 	l.color[0][Control_Button_TrackFocus[0]+Control(j)] = Color(j)
-		// }
-		// l.SwapBuffers(0)
-
-		l.SetColor(0, Control_Button_TrackFocus[0], Color_BrightRed)
-		l.SetColor(0, Control_Button_TrackFocus[1], Flash(Color_BrightYellow))
-		l.SetColor(0, Control_Button_TrackFocus[2], Flash(Color_BrightOrange))
-		l.SetColor(0, Control_Button_TrackFocus[3], Color_BrightGreen)
-
-		l.SetColor(0, Control_Button_TrackControl[0], Color_DimRed)
-		l.SetColor(0, Control_Button_TrackControl[1], Flash(Color_DimYellow))
-		l.SetColor(0, Control_Button_TrackControl[2], Flash(Color_DimOrange))
-		l.SetColor(0, Control_Button_TrackControl[3], Color_DimGreen)
-
-		l.SetColor(0, Control_Knob_SendA[0], Flash(Color_BrightOrange))
-		l.SetColor(0, Control_Knob_SendA[1], FlashUnknown(Color_BrightOrange))
-
-		l.SwapBuffers(0)
-
-	}()
-	go func() {
+		defer wg.Done()
 		for {
-			// return when canceled
+			// Return when canceled
 			select {
 			case <-ctx.Done():
 				return
 			default:
 			}
-			// TODO: Is there a portmidi or libusb function that lets us poll?
+			// Note: Is there a portmidi or libusb function that blocks
+			// while polling?
 			time.Sleep(PollingPeriod)
 
 			evts, err := l.inputStream.Read(MaxEventsPerPoll)
 			if err != nil {
-				fmt.Println("MIDI error", err)
-				cancel()
+				_ = l.handleError(err)
 				return
 			}
 			if len(evts) != 0 {
@@ -245,6 +183,7 @@ func (l *LaunchControl) Run(ctx context.Context) {
 		}
 	}()
 	go func() {
+		defer wg.Done()
 		for {
 			select {
 			case <-ctx.Done():
@@ -257,6 +196,8 @@ func (l *LaunchControl) Run(ctx context.Context) {
 		}
 	}()
 	go func() {
+		defer wg.Done()
+
 		ticker := time.NewTicker(FlashPeriod)
 		defer ticker.Stop()
 
@@ -265,101 +206,28 @@ func (l *LaunchControl) Run(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				l.flash()
+				l.lock.Lock()
+				l.flashes++
+				ch := l.currentChannel
+				l.lock.Unlock()
+
+				_ = l.SwapBuffers(ch)
 			}
 		}
 	}()
 
 	select {
 	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-l.errorChan:
+		return err
 	}
 }
 
-func (l *LaunchControl) getControl(evt portmidi.Event) Control {
-	switch evt.Status & MIDI_Status_Code_Mask {
-	case MIDI_Status_Control_Change:
-		return l.getControlChangeIndex(Value(evt.Data1))
-	case MIDI_Status_Note_On, MIDI_Status_Note_Off:
-		return l.getNoteChangeIndex(Value(evt.Data1))
-	default:
-		return Control_Invalid
-	}
-}
-
-func (l *LaunchControl) event(evt portmidi.Event) {
-	if len(evt.SysEx) != 0 {
-		l.sysexEvent(evt)
-		return
-	}
-
-	midiChannel := Value(evt.Status & MIDI_Channel_Mask)
-	control := l.getControl(evt)
-	if control == Control_Invalid {
-		return
-	}
-
+func (l *LaunchControl) SetColor(midiChan int, ctrl Control, color Color) {
 	l.lock.Lock()
-	defer l.lock.Unlock()
-
-	l.value[midiChannel][control] = Value(evt.Data2)
-}
-
-func (l *LaunchControl) sysexEvent(evt portmidi.Event) {
-	sb := evt.SysEx
-	if len(sb) != 9 {
-		return
-	}
-
-	if bytes.Compare(sb[1:7], []byte{0x0, 0x20, 0x29, 0x2, 0x11, 0x77}) != 0 {
-		return
-	}
-
-	// "Template changed" is the only documented SysEx from the device.
-	l.lock.Lock()
-	l.currentChannel = int(sb[7])
+	l.color[midiChan][ctrl] = color
 	l.lock.Unlock()
-}
-
-func (l *LaunchControl) getControlChangeIndex(data Value) Control {
-	switch {
-	case 13 <= data && data <= 20: // 0ffset 0
-		return Control(data - 13 + 0)
-
-	case 29 <= data && data <= 36: // Offset 8
-		return Control(data - 29 + 8)
-
-	case 49 <= data && data <= 56: // Offset 16
-		return Control(data - 49 + 16)
-
-	case 104 <= data && data <= 107: // Offset 44
-		return Control(data - 104 + 44)
-
-	case 77 <= data && data <= 84: // Offset 48 -- Sliders are missing LEDs :sadface:
-		return Control(data - 77 + 48)
-	}
-
-	return -1
-}
-
-func (l *LaunchControl) getNoteChangeIndex(data Value) Control {
-	switch {
-	case 41 <= data && data <= 44: // 0ffset 24
-		return Control(data - 41 + 24)
-
-	case 57 <= data && data <= 60: // Offset 28
-		return Control(data - 57 + 28)
-
-	case 73 <= data && data <= 76: // Offset 32
-		return Control(data - 73 + 32)
-
-	case 89 <= data && data <= 92: // Offset 36
-		return Control(data - 89 + 36)
-
-	case 105 <= data && data <= 108: // Offset 40
-		return Control(data - 105 + 40)
-	}
-
-	return -1
 }
 
 func (l *LaunchControl) setPixels(midiChan int, colors []Color) error {
@@ -371,28 +239,29 @@ func (l *LaunchControl) setPixels(midiChan int, colors []Color) error {
 		data = append(data, byte(i), colors[i].toByte(flashing, l.value[midiChan][i]))
 	}
 	data = append(data, 0xf7)
-	return l.outputStream.WriteSysExBytes(portmidi.Time(), data)
+	if err := l.outputStream.WriteSysExBytes(portmidi.Time(), data); err != nil {
+		return l.handleError(fmt.Errorf("midi: write sysex: %w", err))
+	}
+	return nil
 }
 
 func (l *LaunchControl) Reset(midiChan int) error {
-	return l.outputStream.WriteShort(0xb0+int64(midiChan), 0x00, 0x00)
-}
-
-func (l *LaunchControl) flash() {
-	l.lock.Lock()
-	l.flashes++
-	l.lock.Unlock()
-
-	// TODO have a "current" channel, stop passing "midiChan" (?).
-	l.SwapBuffers(0)
+	if err := l.outputStream.WriteShort(0xb0+int64(midiChan), 0x00, 0x00); err != nil {
+		return l.handleError(fmt.Errorf("midi: reset: %w", err))
+	}
+	return nil
 }
 
 func (l *LaunchControl) SwapBuffers(midiChan int) error {
 	l.lock.Lock()
 	swapNum := l.swaps[midiChan]
 	l.swaps[midiChan]++
-	l.setPixels(midiChan, l.color[midiChan][:])
+	err := l.setPixels(midiChan, l.color[midiChan][:])
 	l.lock.Unlock()
+
+	if err != nil {
+		return err
+	}
 
 	var data Value
 	if swapNum%2 == 0 {
@@ -401,43 +270,41 @@ func (l *LaunchControl) SwapBuffers(midiChan int) error {
 		data = 0x24
 	}
 
-	return l.outputStream.WriteShort(0xb0+int64(midiChan), 0, int64(data))
-}
-
-func (l *LaunchControl) Close() error {
-	l.inputStream.Close()
-	l.outputStream.Close()
+	if err := l.outputStream.WriteShort(0xb0+int64(midiChan), 0, int64(data)); err != nil {
+		return l.handleError(fmt.Errorf("midi: swap buffers: %w", err))
+	}
 	return nil
 }
 
-// discovers the currently connected LaunchControl device
-// as a MIDI device.
-func discover() (input portmidi.DeviceID, output portmidi.DeviceID, err error) {
-	in := -1
-	out := -1
-	for i := 0; i < portmidi.CountDevices(); i++ {
-		info := portmidi.Info(portmidi.DeviceID(i))
-		if info.Name == "Launch Control XL" {
-			if info.IsInputAvailable {
-				in = i
-			}
-			if info.IsOutputAvailable {
-				out = i
-			}
-		}
+func (l *LaunchControl) SetTemplate(midiChan int) error {
+	data := []byte{0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x77, byte(midiChan), 0xf7}
+	if err := l.outputStream.WriteSysExBytes(portmidi.Time(), data); err != nil {
+		return l.handleError(fmt.Errorf("midi: set template: %w", err))
 	}
-	if in == -1 || out == -1 {
-		err = errors.New("launchctl: no launch control xl is connected")
-	} else {
-		input = portmidi.DeviceID(in)
-		output = portmidi.DeviceID(out)
-	}
-	return
+	l.currentChannel = midiChan
+	return nil
 }
 
-func controlRange(from, to Control) (r []Control) {
-	for c := from; c < to; c++ {
-		r = append(r, c)
+func (l *LaunchControl) Close() error {
+	err1 := l.inputStream.Close()
+	err2 := l.outputStream.Close()
+
+	if err1 != nil {
+		return l.handleError(fmt.Errorf("midi: close streams: %w", err1))
 	}
-	return
+	if err2 != nil {
+		return l.handleError(fmt.Errorf("midi: close streams: %w", err2))
+	}
+	return nil
+}
+
+func (l *LaunchControl) handleError(err error) error {
+	if err == nil {
+		return err
+	}
+	select {
+	case l.errorChan <- err:
+	default:
+	}
+	return err
 }
