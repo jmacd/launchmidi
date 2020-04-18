@@ -23,16 +23,25 @@ func (l *LaunchControl) event(evt portmidi.Event) {
 		return
 	}
 
-	midiChannel := Value(evt.Status & MIDIChannelMask)
+	midiChannel := int(evt.Status & MIDIChannelMask)
 	control := l.getControl(evt)
 	if control == ControlInvalid {
 		return
 	}
 
 	l.lock.Lock()
-	defer l.lock.Unlock()
+	value := Value(evt.Data2)
+	l.value[midiChannel][control] = value
+	cbs := l.calls[midiChannel][control]
+	acbs := l.calls[AllChannels][control]
+	l.lock.Unlock()
 
-	l.value[midiChannel][control] = Value(evt.Data2)
+	for _, cb := range cbs {
+		cb(midiChannel, control, value)
+	}
+	for _, cb := range acbs {
+		cb(midiChannel, control, value)
+	}
 }
 
 func (l *LaunchControl) sysexEvent(evt portmidi.Event) {

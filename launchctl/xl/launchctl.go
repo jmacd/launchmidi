@@ -59,7 +59,7 @@ type (
 	Control int
 
 	// Callback is called when Control values change.  Register with SetCallback.
-	Callback func(midiChan int, control Control)
+	Callback func(midiChan int, control Control, value Value)
 )
 
 const (
@@ -84,7 +84,7 @@ var (
 )
 
 // toFloat ensures that the xl's knob indents at Value 64 return 0.5.
-func (v Value) toFloat() float64 {
+func (v Value) Float() float64 {
 	switch {
 	case v == 0:
 		return 0
@@ -95,7 +95,7 @@ func (v Value) toFloat() float64 {
 	case v < 64:
 		return float64(v) / 128
 	default:
-		return 0.5 + float64(v-64)/63
+		return float64(v-1) / 126
 	}
 }
 

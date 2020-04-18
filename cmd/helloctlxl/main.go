@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -56,6 +57,14 @@ func main() {
 
 		_ = l.SwapBuffers(0)
 	}()
+
+	cb := func(ch int, control xl.Control, value xl.Value) {
+		fmt.Println("Set channel", ch, "control", control, "value", value.Float())
+	}
+	for i := xl.Control(0); i < xl.NumControls; i++ {
+		l.AddCallback(xl.AllChannels, i, cb)
+	}
+
 	if err := l.Run(ctx); err != nil {
 		log.Fatal("error running launchctl: ", err)
 	}
