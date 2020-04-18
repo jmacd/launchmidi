@@ -132,7 +132,7 @@ func (l *LaunchControl) AddCallback(midiChan int, control Control, callback Call
 	l.lock.Lock()
 	defer l.lock.Unlock()
 
-	l.calls[midiChan] = append(l.calls[midiChan], callback)
+	l.calls[midiChan][control] = append(l.calls[midiChan][control], callback)
 }
 
 // Run begins listening for updates, blocking the caller until the
@@ -158,8 +158,6 @@ func (l *LaunchControl) Run(ctx context.Context) error {
 	if err := l.SetTemplate(0); err != nil {
 		return err
 	}
-
-	go l.tester() // @@@ remove me
 
 	go func() {
 		defer wg.Done()
@@ -309,42 +307,4 @@ func (l *LaunchControl) handleError(err error) error {
 	default:
 	}
 	return err
-}
-
-func (l *LaunchControl) tester() {
-	// i := 0
-	// for {
-	// 	i = (i + NumLEDs + 1) % NumLEDs
-	// 	l.color[0][i] = 0xf
-	// 	l.SwapBuffers(0)
-	// 	l.color[0][i] = 0
-	// }
-
-	// for {
-	// 	for j := 0; j < NumLEDs; j++ {
-	// 		l.color[0][j] = Color(l.value[0][0] / 8)
-	// 	}
-	// 	l.SwapBuffers(0)
-	// 	time.Sleep(50 * time.Millisecond)
-	// }
-
-	// for j := 0; j < 16; j++ {
-	// 	l.color[0][ControlButtonTrackFocus[0]+Control(j)] = Color(j)
-	// }
-	// l.SwapBuffers(0)
-
-	l.SetColor(0, ControlButtonTrackFocus[0], ColorBrightRed)
-	l.SetColor(0, ControlButtonTrackFocus[1], Flash(ColorBrightYellow))
-	l.SetColor(0, ControlButtonTrackFocus[2], Flash(ColorBrightOrange))
-	l.SetColor(0, ControlButtonTrackFocus[3], ColorBrightGreen)
-
-	l.SetColor(0, ControlButtonTrackControl[0], ColorDimRed)
-	l.SetColor(0, ControlButtonTrackControl[1], Flash(ColorDimYellow))
-	l.SetColor(0, ControlButtonTrackControl[2], Flash(ColorDimOrange))
-	l.SetColor(0, ControlButtonTrackControl[3], ColorDimGreen)
-
-	l.SetColor(0, ControlKnobSendA[0], Flash(ColorBrightOrange))
-	l.SetColor(0, ControlKnobSendA[1], FlashUnknown(ColorBrightOrange))
-
-	_ = l.SwapBuffers(0)
 }
