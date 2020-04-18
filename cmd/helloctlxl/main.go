@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"time"
 
 	launchctl "github.com/jmacd/launchmidi/launchctl/xl"
 )
@@ -15,22 +16,9 @@ func main() {
 	defer ctl.Close()
 
 	ctx := context.Background()
+	ctx, _ = context.WithTimeout(ctx, time.Second*5)
 
-	ctl.Run(ctx)
-
-	// 	for {
-	// 		if err := ctl.Buffer(0, 0); err != nil {
-	// 			log.Panic("Reset failed: ", err)
-	// 		}
-
-	// 		time.Sleep(10 * time.Millisecond)
-
-	// 		if err := ctl.Buffer(0, 1); err != nil {
-	// 			log.Panic("Reset failed: ", err)
-	// 		}
-	// 		time.Sleep(10 * time.Millisecond)
-
-	// 	}
-
-	select {}
+	if err := ctl.Run(ctx); err != nil {
+		log.Fatal("error running launchctl: ", err)
+	}
 }
