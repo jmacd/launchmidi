@@ -36,14 +36,24 @@ func FlashUnknown(c Color) Color {
 	return c | ColorFlashIfUninitialized
 }
 
-func (c Color) toByte(flashOff bool, v Value) byte {
-	if flashOff && c&ColorFlash != 0 {
-		return 0
+func (c Color) isFlashing(v Value) bool {
+	if c&ColorFlash != 0 {
+		return true
 	}
-	if flashOff && c&ColorFlashIfUninitialized != 0 {
+	if c&ColorFlashIfUninitialized != 0 {
 		if v == ValueUninitialized {
+			return true
+		}
+	}
+	return false
+}
+
+func (c Color) toByte(flashingOff, flasher bool, v Value) byte {
+	if flashingOff && flasher {
+		if c != 0 {
 			return 0
 		}
+		c = ColorDimYellow
 	}
 	red := (byte(c) & 0xc) >> 2
 	green := byte(c) & 0x3
