@@ -19,6 +19,7 @@ var (
 	ControlKnobPanDevice      = controlRange(16, 24)
 	ControlButtonTrackFocus   = controlRange(24, 32)
 	ControlButtonTrackControl = controlRange(32, 40)
+	ControlSlider             = controlRange(48, 56)
 )
 
 func controlRange(from, to Control) (r []Control) {
@@ -26,4 +27,14 @@ func controlRange(from, to Control) (r []Control) {
 		r = append(r, c)
 	}
 	return
+}
+
+func (l *LaunchControl) Get(control Control) float64 {
+	l.lock.Lock()
+	defer l.lock.Unlock()
+	v := l.value[l.currentChannel][control]
+	if v == ValueUninitialized {
+		return 0.5
+	}
+	return v.Float()
 }

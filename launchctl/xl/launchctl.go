@@ -39,7 +39,7 @@ type (
 		color [NumChannels][NumControls]Color // colors [0-15] + 2 bits
 		value [NumChannels][NumControls]Value // control values [0-127] or uninitialized
 
-		// calls has an additional entry representing AllChannels.
+		// calls have an additional entry representing AllChannels.
 		calls [NumChannels + 1][NumControls][]Callback
 	}
 
@@ -230,13 +230,47 @@ func (l *LaunchControl) SetColor(midiChan int, ctrl Control, color Color) {
 	l.lock.Unlock()
 }
 
+func (l *LaunchControl) isFlashing(midiChan int, ctrl Control) bool {
+	return l.color[midiChan][ctrl].isFlashing(l.value[midiChan][ctrl])
+}
+
+func (l *LaunchControl) computeFlash(midiChan int, ctrl Control) bool {
+	if l.isFlashing(midiChan, ctrl) {
+		return true
+	}
+
+	switch {
+	case ctrl >= ControlButtonTrackFocus[0] && ctrl <= ControlButtonTrackFocus[7]:
+		// Track focus buttons are adjacent to one slider each.
+		return l.isFlashing(midiChan, ControlSlider[ctrl-ControlButtonTrackFocus[0]])
+	case ctrl >= ControlButtonDevice && ctrl <= ControlButtonRecord:
+		// Device-Record buttons are adjacent to all sliders.
+		for i := 0; i < 8; i++ {
+			if l.isFlashing(midiChan, ControlSlider[i]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (l *LaunchControl) setPixels(midiChan int, colors []Color) error {
-	flashing := l.flashes%2 == 1
+	flashingOff := l.flashes%2 == 1
 
 	data := make([]byte, 0, 60)
 	data = append(data, 0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x78, byte(midiChan))
 	for i := 0; i < 48; i++ {
-		data = append(data, byte(i), colors[i].toByte(flashing, l.value[midiChan][i]))
+		flasher := l.computeFlash(midiChan, Control(i))
+
+		data = append(
+			data,
+			byte(i),
+			colors[i].toByte(
+				flashingOff,
+				flasher,
+				l.value[midiChan][i],
+			),
+		)
 	}
 	data = append(data, 0xf7)
 	if err := l.outputStream.WriteSysExBytes(portmidi.Time(), data); err != nil {
