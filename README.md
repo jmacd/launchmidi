@@ -1,94 +1,70 @@
-# launchpad [![GoDoc](https://godoc.org/github.com/rakyll/launchpad?status.svg)](https://godoc.org/github.com/rakyll/launchpad)
-A package allows you to talk to your Novation Launchpad in Go. Light buttons
-or read your touches.
+# launchmidi [![GoDoc](https://godoc.org/github.com/jmacd/launchmidi?status.svg)](https://godoc.org/github.com/jmacd/launchmidi)
+This package allows lets you program with your Novation LaunchControl XL in Go.
 
-This library is currently only working with [Launchpad S (Green-Red Launchpads)](https://www.amazon.com/dp/B00E3XTKAG) but we are trying to support multiple models and layouts.
+This library offers full control over this device, including:
+- Read current values of 24 knobs, 8 sliders, and 24 buttons
+- Callbacks for reacting to change on 56 controls
+- Template switching support
+- Color doubled-buffering
+- Flashing LEDs
+- `FlashUnknown()` supports flashing uninitialized knobs and sliders.
 
-~~~ sh
-go get github.com/rakyll/launchpad
-~~~
-
-Portmidi is required to use this package.
-
+```sh
+go get github.com/jmacd/launchmidi
 ```
+
+[Portmidi](github.com/rakyll/launchmidi) is required to use this package.
+
+```sh
 $ apt-get install libportmidi-dev
 # or
 $ brew install portmidi
 ```
 
-## Usage
-Initialize a new Launchpad. If there are no currently connected Launchpad
-device, initialization will fail with an error. You can fake a device by
-creating an input and output MIDI device and name them as Launchpad.
-~~~ go
-pad, err = launchpad.Open();
-if err != nil {
-    log.Fatalf("Error initializing launchpad: %v", err)
-}
-defer pad.Close()
+## Example: Flash all the buttons
 
-// turn off all of the lights
-pad.Clear()
-~~~
+This program flashes the 3 rows of knohs and 2 rows of buttons times 8 columns of LEDs at startup.  Half of the controls are set to flashing uninitialized, the other half flash indefinitely.
 
-### Coordinate system
+This exhibits how "flash" is treated for sliders, which do not have LEDs.  Sliders flash on the adjacent Track Focus button below.  Any flashing slider causes the four right-side (Device, Mute, Solo, Record Arm) buttons to flash.
 
-The coordinate system is illustrated below.
-~~~
-+--------- arrow keys -----------+  +--- mode keys ---+
-{0, 8} {1, 8} {2, 8} {3, 8} {4, 8} {5, 8} {6, 8} {7, 8} | ableton
-----------------------------------------------------------------
-{0, 0} {1, 0} {2, 0} {3, 0} {4, 0} {5, 0} {6, 0} {7, 0} | {8, 0} vol
-----------------------------------------------------------------
-{0, 1} {1, 1} {2, 1} {3, 1} {4, 1} {5, 1} {6, 1} {7, 1} | {8, 1} pan
-----------------------------------------------------------------
-{0, 2} {1, 2} {2, 2} {3, 2} {4, 2} {5, 2} {6, 2} {7, 2} | {8, 2} sndA
-----------------------------------------------------------------
-{0, 3} {1, 3} {2, 3} {3, 3} {4, 3} {5, 3} {6, 3} {7, 3} | {8, 3} sndB
-----------------------------------------------------------------
-{0, 4} {1, 4} {2, 4} {3, 4} {4, 4} {5, 4} {6, 4} {7, 4} | {8, 4} stop
-----------------------------------------------------------------
-{0, 5} {1, 5} {2, 5} {3, 5} {4, 5} {5, 5} {6, 5} {7, 5} | {8, 5} trk on
-----------------------------------------------------------------
-{0, 6} {1, 6} {2, 6} {3, 6} {4, 6} {5, 6} {6, 6} {7, 6} | {8, 6} solo
-----------------------------------------------------------------
-{0, 7} {1, 7} {2, 7} {3, 7} {4, 7} {5, 7} {6, 7} {7, 7} | {8, 7} arm
-----------------------------------------------------------------
-~~~
+```go
+package main
 
-## Demo: Light your touchs
+import (
+	"context"
+	"log"
 
-A simple program to light every touch:
+	"github.com/jmacd/launchmidi/launchctl/xl"
+)
 
-~~~ go
-pad, err := launchpad.Open()
-if err != nil {
-    log.Fatal(err)
-}
-defer pad.Close()
-
-pad.Clear()
-
-ch := pad.Listen()
-for {
-	select {
-	case hit := <-ch:
-		pad.Light(hit.X, hit.Y, 3, 3)
+func main() {
+	l, err := xl.Open()
+	if err != nil {
+		log.Fatalf("error while openning connection to launchctl: %v", err)
 	}
+	defer l.Close()
+
+	go l.Run(context.Background())
+
+	const midiChan = 0
+	for i := 0; i < 8; i++ {
+		c := xl.EightColors[i]
+		cf := c
+		cfu := c
+		if i%2 == 1 {
+			cf = xl.Flash(c)
+		} else {
+			cfu = xl.FlashUnknown(c)
+		}
+
+		l.SetColor(midiChan, xl.ControlKnobSendA[i], cfu)
+		l.SetColor(midiChan, xl.ControlKnobSendB[i], cfu)
+		l.SetColor(midiChan, xl.ControlKnobPanDevice[i], cfu)
+		l.SetColor(midiChan, xl.ControlSlider[i], cfu)
+		l.SetColor(midiChan, xl.ControlButtonTrackFocus[i], cf)
+		l.SetColor(midiChan, xl.ControlButtonTrackControl[i], cf)
+	}
+	l.SwapBuffers(midiChan)
+	select {}
 }
-~~~
-    
-## License
-    Copyright 2013 Google Inc. All Rights Reserved.
-    
-    Licensed under the Apache License, Version 2.0 (the "License");
-    you may not use this file except in compliance with the License.
-    You may obtain a copy of the License at
-    
-         http://www.apache.org/licenses/LICENSE-2.0
-    
-    Unless required by applicable law or agreed to in writing, software
-    distributed under the License is distributed on an "AS IS" BASIS,
-    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-    See the License for the specific language governing permissions and
-    limitations under the License.
+```

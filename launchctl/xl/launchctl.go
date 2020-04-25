@@ -121,8 +121,12 @@ func Open() (*LaunchControl, error) {
 		errorChan:    make(chan error, 1),
 	}
 	for ch := 0; ch < NumChannels; ch++ {
-		for cc := 0; cc < NumControls; cc++ {
-			lc.value[ch][cc] = ValueUninitialized
+		for cc := Control(0); cc < NumControls; cc++ {
+			v0 := ValueUninitialized
+			if cc.IsButton() {
+				v0 = 0
+			}
+			lc.value[ch][cc] = v0
 		}
 	}
 	return lc, nil
@@ -261,16 +265,13 @@ func (l *LaunchControl) setPixels(midiChan int, colors []Color) error {
 	data = append(data, 0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x78, byte(midiChan))
 	for i := 0; i < 48; i++ {
 		flasher := l.computeFlash(midiChan, Control(i))
-
-		data = append(
-			data,
-			byte(i),
-			colors[i].toByte(
-				flashingOff,
-				flasher,
-				l.value[midiChan][i],
-			),
+		show := colors[i].toByte(
+			flashingOff,
+			flasher,
+			l.value[midiChan][i],
 		)
+
+		data = append(data, byte(i), show)
 	}
 	data = append(data, 0xf7)
 	if err := l.outputStream.WriteSysExBytes(portmidi.Time(), data); err != nil {
