@@ -29,6 +29,10 @@ func controlRange(from, to Control) (r []Control) {
 	return
 }
 
+func (c Control) IsButton() bool {
+	return c >= 24 && c < 48
+}
+
 func (l *LaunchControl) Get(control Control) float64 {
 	l.lock.Lock()
 	defer l.lock.Unlock()
