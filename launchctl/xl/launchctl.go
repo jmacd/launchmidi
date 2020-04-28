@@ -258,6 +258,14 @@ func (l *LaunchControl) computeFlash(midiChan int, ctrl Control) bool {
 	return false
 }
 
+func (l *LaunchControl) Clear(midiChan int) {
+	l.lock.Lock()
+	for i := 0; i < NumControls; i++ {
+		l.color[midiChan][i] = 0
+	}
+	l.lock.Unlock()
+}
+
 func (l *LaunchControl) setPixels(midiChan int, colors []Color) error {
 	flashingOff := l.flashes%2 == 1
 

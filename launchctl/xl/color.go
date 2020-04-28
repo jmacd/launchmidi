@@ -26,6 +26,19 @@ var (
 		ColorDimYellow,
 		ColorDimGreen,
 	}
+
+	FourDimColors = []Color{
+		ColorDimRed,
+		ColorDimOrange,
+		ColorDimYellow,
+		ColorDimGreen,
+	}
+	FourBrightColors = []Color{
+		ColorBrightRed,
+		ColorBrightOrange,
+		ColorBrightYellow,
+		ColorBrightGreen,
+	}
 )
 
 func Flash(c Color) Color {
