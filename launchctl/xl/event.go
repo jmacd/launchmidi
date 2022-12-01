@@ -2,6 +2,7 @@ package xl
 
 import (
 	"bytes"
+	"fmt"
 
 	"github.com/rakyll/portmidi"
 )
@@ -18,6 +19,7 @@ func (l *LaunchControl) getControl(evt portmidi.Event) Control {
 }
 
 func (l *LaunchControl) event(evt portmidi.Event) {
+	fmt.Println("ONE EVENT", evt)
 	if len(evt.SysEx) != 0 {
 		l.sysexEvent(evt)
 		return

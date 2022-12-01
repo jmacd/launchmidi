@@ -75,8 +75,11 @@ const (
 
 	FlashPeriod      = 433 * time.Millisecond
 	MaxEventsPerPoll = 1024
-	PollingPeriod    = 10 * time.Millisecond
+	PollingPeriod    = 100 * time.Millisecond
 	ReadBufferDepth  = 16
+
+	// Delay relates to https://www.alsa-project.org/pipermail/alsa-devel/2018-December/143551.html
+	Delay = 10 * time.Millisecond
 )
 
 var (
@@ -177,6 +180,7 @@ func (l *LaunchControl) Run(ctx context.Context) error {
 			time.Sleep(PollingPeriod)
 
 			evts, err := l.inputStream.Read(MaxEventsPerPoll)
+			fmt.Println("READ RETURNS", len(evts), err)
 			if err != nil {
 				_ = l.handleError(err)
 				return
@@ -285,6 +289,8 @@ func (l *LaunchControl) setPixels(midiChan int, colors []Color) error {
 	if err := l.outputStream.WriteSysExBytes(portmidi.Time(), data); err != nil {
 		return l.handleError(fmt.Errorf("midi: write sysex: %w", err))
 	}
+	// Note ALSA: seq_midi: MIDI output buffer overrun
+	time.Sleep(Delay)
 	return nil
 }
 
@@ -292,6 +298,7 @@ func (l *LaunchControl) Reset(midiChan int) error {
 	if err := l.outputStream.WriteShort(0xb0+int64(midiChan), 0x00, 0x00); err != nil {
 		return l.handleError(fmt.Errorf("midi: reset: %w", err))
 	}
+	time.Sleep(Delay)
 	return nil
 }
 
@@ -316,6 +323,7 @@ func (l *LaunchControl) SwapBuffers(midiChan int) error {
 	if err := l.outputStream.WriteShort(0xb0+int64(midiChan), 0, int64(data)); err != nil {
 		return l.handleError(fmt.Errorf("midi: swap buffers: %w", err))
 	}
+	time.Sleep(Delay)
 	return nil
 }
 
@@ -324,6 +332,7 @@ func (l *LaunchControl) SetTemplate(midiChan int) error {
 	if err := l.outputStream.WriteSysExBytes(portmidi.Time(), data); err != nil {
 		return l.handleError(fmt.Errorf("midi: set template: %w", err))
 	}
+	time.Sleep(Delay)
 	l.currentChannel = midiChan
 	return nil
 }

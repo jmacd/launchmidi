@@ -1,6 +1,11 @@
 package xl
 
-import "github.com/rakyll/portmidi"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/rakyll/portmidi"
+)
 
 const (
 	MIDIStatusNoteOff       = 0x80
@@ -17,7 +22,8 @@ func discover() (input portmidi.DeviceID, output portmidi.DeviceID, err error) {
 	out := -1
 	for i := 0; i < portmidi.CountDevices(); i++ {
 		info := portmidi.Info(portmidi.DeviceID(i))
-		if info.Name == DeviceName {
+		fmt.Println(info)
+		if strings.HasPrefix(info.Name, DeviceName) {
 			if info.IsInputAvailable {
 				in = i
 			}
