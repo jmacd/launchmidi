@@ -21,19 +21,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rakyll/portmidi"
+	"gitlab.com/gomidi/midi/v2/drivers"
 )
 
 type (
 	// LaunchControl represents a device with an input and output MIDI stream.
 	LaunchControl struct {
-		inputStream  *portmidi.Stream
-		outputStream *portmidi.Stream
+		inputDriver  drivers.In
+		outputDriver drivers.Out
 
 		lock           sync.Mutex
 		flashes        int64
 		currentChannel int
 		errorChan      chan error
+		stopFn         func()
 
 		swaps [NumChannels]int64              // number of swaps
 		color [NumChannels][NumControls]Color // colors [0-15] + 2 bits
@@ -73,13 +74,8 @@ const (
 
 	AllChannels = NumChannels // Use with AddCallback.
 
-	FlashPeriod      = 433 * time.Millisecond
-	MaxEventsPerPoll = 1024
-	PollingPeriod    = 100 * time.Millisecond
-	ReadBufferDepth  = 16
-
-	// Delay relates to https://www.alsa-project.org/pipermail/alsa-devel/2018-December/143551.html
-	Delay = 10 * time.Millisecond
+	FlashPeriod     = 433 * time.Millisecond
+	ReadBufferDepth = 16
 )
 
 var (
@@ -111,16 +107,17 @@ func Open() (*LaunchControl, error) {
 		return nil, err
 	}
 
-	var inStream, outStream *portmidi.Stream
-	if inStream, err = portmidi.NewInputStream(input, MaxEventsPerPoll); err != nil {
+	if err := input.Open(); err != nil {
 		return nil, err
 	}
-	if outStream, err = portmidi.NewOutputStream(output, MaxEventsPerPoll, 0); err != nil {
+
+	if err := output.Open(); err != nil {
 		return nil, err
 	}
+
 	lc := &LaunchControl{
-		inputStream:  inStream,
-		outputStream: outStream,
+		inputDriver:  input,
+		outputDriver: output,
 		errorChan:    make(chan error, 1),
 	}
 	for ch := 0; ch < NumChannels; ch++ {
@@ -148,9 +145,8 @@ func (l *LaunchControl) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 
 	defer cancel()
-	ch := make(chan []portmidi.Event, ReadBufferDepth)
+	ch := make(chan Event, ReadBufferDepth)
 	wg := sync.WaitGroup{}
-	wg.Add(3) // event reader, event processor, flasher routines
 
 	for i := 0; i < NumChannels; i++ {
 		if err := l.Reset(i); err != nil {
@@ -166,42 +162,46 @@ func (l *LaunchControl) Run(ctx context.Context) error {
 		return err
 	}
 
-	go func() {
-		defer wg.Done()
-		for {
-			// Return when canceled
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			// Note: Is there a portmidi or libusb function that blocks
-			// while polling?
-			time.Sleep(PollingPeriod)
+	lcfg := drivers.ListenConfig{
+		TimeCode:    false,
+		ActiveSense: false,
+		SysEx:       true,
+		OnErr: func(err error) {
+			_ = l.handleError(err)
+		},
+	}
 
-			evts, err := l.inputStream.Read(MaxEventsPerPoll)
-			if err != nil {
-				_ = l.handleError(err)
-				return
+	var err error
+	l.stopFn, err = l.inputDriver.Listen(func(msg []byte, milliseconds int32) {
+		if len(msg) == 3 {
+			ch <- Event{
+				Timestamp: milliseconds,
+				Status:    msg[0],
+				Data1:     msg[1],
+				Data2:     msg[2],
 			}
-			if len(evts) != 0 {
-				ch <- evts
-			}
+		} else {
+			l.sysexEvent(msg)
 		}
-	}()
+	}, lcfg)
+	if err != nil {
+		return err
+	}
+
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case evts := <-ch:
-				for _, evt := range evts {
-					l.event(evt)
-				}
+			case evt := <-ch:
+				l.event(evt)
 			}
 		}
 	}()
+
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 
@@ -285,19 +285,16 @@ func (l *LaunchControl) setPixels(midiChan int, colors []Color) error {
 		data = append(data, byte(i), show)
 	}
 	data = append(data, 0xf7)
-	if err := l.outputStream.WriteSysExBytes(portmidi.Time(), data); err != nil {
+	if err := l.outputDriver.Send(data); err != nil {
 		return l.handleError(fmt.Errorf("midi: write sysex: %w", err))
 	}
-	// Note ALSA: seq_midi: MIDI output buffer overrun
-	time.Sleep(Delay)
 	return nil
 }
 
 func (l *LaunchControl) Reset(midiChan int) error {
-	if err := l.outputStream.WriteShort(0xb0+int64(midiChan), 0x00, 0x00); err != nil {
+	if err := l.outputDriver.Send([]byte{0xb0 + byte(midiChan), 0x00, 0x00}); err != nil {
 		return l.handleError(fmt.Errorf("midi: reset: %w", err))
 	}
-	time.Sleep(Delay)
 	return nil
 }
 
@@ -319,26 +316,26 @@ func (l *LaunchControl) SwapBuffers(midiChan int) error {
 		data = 0x24
 	}
 
-	if err := l.outputStream.WriteShort(0xb0+int64(midiChan), 0, int64(data)); err != nil {
+	if err := l.outputDriver.Send([]byte{0xb0 + byte(midiChan), 0, byte(data)}); err != nil {
 		return l.handleError(fmt.Errorf("midi: swap buffers: %w", err))
 	}
-	time.Sleep(Delay)
 	return nil
 }
 
 func (l *LaunchControl) SetTemplate(midiChan int) error {
 	data := []byte{0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x77, byte(midiChan), 0xf7}
-	if err := l.outputStream.WriteSysExBytes(portmidi.Time(), data); err != nil {
+	if err := l.outputDriver.Send(data); err != nil {
 		return l.handleError(fmt.Errorf("midi: set template: %w", err))
 	}
-	time.Sleep(Delay)
 	l.currentChannel = midiChan
 	return nil
 }
 
 func (l *LaunchControl) Close() error {
-	err1 := l.inputStream.Close()
-	err2 := l.outputStream.Close()
+	l.stopFn()
+
+	err1 := l.inputDriver.Close()
+	err2 := l.outputDriver.Close()
 
 	if err1 != nil {
 		return l.handleError(fmt.Errorf("midi: close streams: %w", err1))
