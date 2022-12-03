@@ -180,7 +180,6 @@ func (l *LaunchControl) Run(ctx context.Context) error {
 			time.Sleep(PollingPeriod)
 
 			evts, err := l.inputStream.Read(MaxEventsPerPoll)
-			fmt.Println("READ RETURNS", len(evts), err)
 			if err != nil {
 				_ = l.handleError(err)
 				return
