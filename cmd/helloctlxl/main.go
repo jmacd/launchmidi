@@ -7,13 +7,12 @@ import (
 	"time"
 
 	"github.com/jmacd/launchmidi/launchctl/xl"
-	launchctl "github.com/jmacd/launchmidi/launchctl/xl"
 )
 
 const duration = 10 * time.Second
 
 func main() {
-	l, err := launchctl.Open()
+	l, err := xl.Open()
 	if err != nil {
 		log.Fatalf("error while openning connection to launchctl: %v", err)
 	}
@@ -33,6 +32,9 @@ func main() {
 			l.SetColor(0, i, 0)
 			i = (i + xl.NumLEDs + 1) % xl.NumLEDs
 		}
+
+		// TODO: Note that the behavior written above continues at this point,
+		// does this indicate buffered data?
 
 		for b := 0; b < 8; b += 4 {
 			l.SetColor(0, xl.ControlButtonTrackFocus[0+b], xl.ColorBrightRed)

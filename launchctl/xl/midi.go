@@ -1,6 +1,12 @@
 package xl
 
-import "github.com/rakyll/portmidi"
+import (
+	"fmt"
+
+	"gitlab.com/gomidi/midi/v2"
+	"gitlab.com/gomidi/midi/v2/drivers"
+	_ "gitlab.com/gomidi/midi/v2/drivers/rtmididrv"
+)
 
 const (
 	MIDIStatusNoteOff       = 0x80
@@ -10,27 +16,18 @@ const (
 	MIDIChannelMask         = 0x0f
 )
 
-// discover finds the first connected LaunchControl device as a MIDI
-// device.
-func discover() (input portmidi.DeviceID, output portmidi.DeviceID, err error) {
-	in := -1
-	out := -1
-	for i := 0; i < portmidi.CountDevices(); i++ {
-		info := portmidi.Info(portmidi.DeviceID(i))
-		if info.Name == DeviceName {
-			if info.IsInputAvailable {
-				in = i
-			}
-			if info.IsOutputAvailable {
-				out = i
-			}
-		}
+func discover() (drivers.In, drivers.Out, error) {
+	defer midi.CloseDriver()
+
+	in, err := midi.FindInPort("XL")
+	if err != nil {
+		return nil, nil, fmt.Errorf("can't find input: %w", err)
 	}
-	if in == -1 || out == -1 {
-		err = ErrNoLaunchControl
-	} else {
-		input = portmidi.DeviceID(in)
-		output = portmidi.DeviceID(out)
+
+	out, err := midi.FindOutPort("XL")
+	if err != nil {
+		return nil, nil, fmt.Errorf("can't find output: %w", err)
 	}
-	return
+
+	return in, out, nil
 }

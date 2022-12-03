@@ -2,11 +2,16 @@ package xl
 
 import (
 	"bytes"
-
-	"github.com/rakyll/portmidi"
 )
 
-func (l *LaunchControl) getControl(evt portmidi.Event) Control {
+type Event struct {
+	Timestamp int32
+	Status    byte
+	Data1     byte
+	Data2     byte
+}
+
+func (l *LaunchControl) getControl(evt Event) Control {
 	switch evt.Status & MIDIStatusCodeMask {
 	case MIDIStatusControlChange:
 		return l.getControlChangeIndex(Value(evt.Data1))
@@ -17,12 +22,7 @@ func (l *LaunchControl) getControl(evt portmidi.Event) Control {
 	}
 }
 
-func (l *LaunchControl) event(evt portmidi.Event) {
-	if len(evt.SysEx) != 0 {
-		l.sysexEvent(evt)
-		return
-	}
-
+func (l *LaunchControl) event(evt Event) {
 	midiChannel := int(evt.Status & MIDIChannelMask)
 	control := l.getControl(evt)
 	if control == ControlInvalid {
@@ -44,8 +44,7 @@ func (l *LaunchControl) event(evt portmidi.Event) {
 	}
 }
 
-func (l *LaunchControl) sysexEvent(evt portmidi.Event) {
-	sb := evt.SysEx
+func (l *LaunchControl) sysexEvent(sb []byte) {
 	if len(sb) != 9 {
 		return
 	}
