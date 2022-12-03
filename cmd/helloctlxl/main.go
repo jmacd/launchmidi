@@ -9,7 +9,7 @@ import (
 	"github.com/jmacd/launchmidi/launchctl/xl"
 )
 
-const duration = 1000 * time.Second
+const duration = 10 * time.Second
 
 func main() {
 	l, err := xl.Open()
@@ -21,17 +21,20 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), duration)
 	defer cancel()
 
-	// start := time.Now()
+	start := time.Now()
 
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 
-		// for i := xl.Control(0); time.Now().Sub(start) < duration/4; {
-		// 	l.SetColor(0, i, 0xf)
-		// 	l.SwapBuffers(0)
-		// 	l.SetColor(0, i, 0)
-		// 	i = (i + xl.NumLEDs + 1) % xl.NumLEDs
-		// }
+		for i := xl.Control(0); time.Now().Sub(start) < duration/4; {
+			l.SetColor(0, i, 0xf)
+			l.SwapBuffers(0)
+			l.SetColor(0, i, 0)
+			i = (i + xl.NumLEDs + 1) % xl.NumLEDs
+		}
+
+		// TODO: Note that the behavior written above continues at this point,
+		// does this indicate buffered data?
 
 		for b := 0; b < 8; b += 4 {
 			l.SetColor(0, xl.ControlButtonTrackFocus[0+b], xl.ColorBrightRed)

@@ -24,6 +24,11 @@ import (
 	"gitlab.com/gomidi/midi/v2/drivers"
 )
 
+// TODO: Are calls to Send() blocking?  The example in
+// ../../cmd/helloctlxl demonstrates how messages are apparently
+// buffered because the flashing behavior continues past the calls to
+// SwapBuffers in the fast loop.
+
 type (
 	// LaunchControl represents a device with an input and output MIDI stream.
 	LaunchControl struct {
