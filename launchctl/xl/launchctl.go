@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jmacd/launchmidi/midi/controller"
 	"gitlab.com/gomidi/midi/v2/drivers"
 )
 
@@ -54,18 +55,18 @@ type (
 	// initially unknown state of the Control.  Additional color bits
 	// `ColorFlash` (and `ColorFlashIfUninitialized`) support flashing (when
 	// uninitialized).
-	Value uint8
+	Value = controller.Value
 
 	// Color is 4 bits of color information.
-	Color byte
+	Color = controller.Color
 
 	// Control indexes are assigned in the range [0, NumControls).
 	// They are ordered such that the control number equals the
 	// LED number for the first 48 controls.
-	Control int
+	Control = controller.Control
 
 	// Callback is called when Control values change.  Register with SetCallback.
-	Callback func(midiChan int, control Control, value Value)
+	Callback = controller.Callback
 )
 
 const (
@@ -86,22 +87,6 @@ const (
 var (
 	ErrNoLaunchControl = fmt.Errorf("launchctl: no launch control xl is connected")
 )
-
-// toFloat ensures that the xl's knob indents at Value 64 return 0.5.
-func (v Value) Float() float64 {
-	switch {
-	case v == 0:
-		return 0
-	case v == 64:
-		return 0.5
-	case v == 127:
-		return 1
-	case v < 64:
-		return float64(v) / 128
-	default:
-		return float64(v-1) / 126
-	}
-}
 
 // Open opens a connection to the XL and initializes an input and
 // output stream to the currently connected device. If there are no
@@ -128,7 +113,7 @@ func Open() (*LaunchControl, error) {
 	for ch := 0; ch < NumChannels; ch++ {
 		for cc := Control(0); cc < NumControls; cc++ {
 			v0 := ValueUninitialized
-			if cc.IsButton() {
+			if controlIsButton(cc) {
 				v0 = 0
 			}
 			lc.value[ch][cc] = v0
@@ -243,7 +228,7 @@ func (l *LaunchControl) SetColor(midiChan int, ctrl Control, color Color) {
 }
 
 func (l *LaunchControl) isFlashing(midiChan int, ctrl Control) bool {
-	return l.color[midiChan][ctrl].isFlashing(l.value[midiChan][ctrl])
+	return colorIsFlashing(l.color[midiChan][ctrl], l.value[midiChan][ctrl])
 }
 
 func (l *LaunchControl) computeFlash(midiChan int, ctrl Control) bool {
@@ -281,7 +266,8 @@ func (l *LaunchControl) setPixels(midiChan int, colors []Color) error {
 	data = append(data, 0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x78, byte(midiChan))
 	for i := 0; i < 48; i++ {
 		flasher := l.computeFlash(midiChan, Control(i))
-		show := colors[i].toByte(
+		show := colorToByte(
+			colors[i],
 			flashingOff,
 			flasher,
 			l.value[midiChan][i],
@@ -293,6 +279,7 @@ func (l *LaunchControl) setPixels(midiChan int, colors []Color) error {
 	if err := l.outputDriver.Send(data); err != nil {
 		return l.handleError(fmt.Errorf("midi: write sysex: %w", err))
 	}
+	time.Sleep(time.Millisecond)
 	return nil
 }
 
@@ -300,6 +287,7 @@ func (l *LaunchControl) Reset(midiChan int) error {
 	if err := l.outputDriver.Send([]byte{0xb0 + byte(midiChan), 0x00, 0x00}); err != nil {
 		return l.handleError(fmt.Errorf("midi: reset: %w", err))
 	}
+	time.Sleep(time.Millisecond)
 	return nil
 }
 
@@ -324,6 +312,7 @@ func (l *LaunchControl) SwapBuffers(midiChan int) error {
 	if err := l.outputDriver.Send([]byte{0xb0 + byte(midiChan), 0, byte(data)}); err != nil {
 		return l.handleError(fmt.Errorf("midi: swap buffers: %w", err))
 	}
+	time.Sleep(time.Millisecond)
 	return nil
 }
 
@@ -332,6 +321,7 @@ func (l *LaunchControl) SetTemplate(midiChan int) error {
 	if err := l.outputDriver.Send(data); err != nil {
 		return l.handleError(fmt.Errorf("midi: set template: %w", err))
 	}
+	time.Sleep(time.Millisecond)
 	l.currentChannel = midiChan
 	return nil
 }

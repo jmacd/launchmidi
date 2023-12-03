@@ -49,7 +49,7 @@ func FlashUnknown(c Color) Color {
 	return c | ColorFlashIfUninitialized
 }
 
-func (c Color) isFlashing(v Value) bool {
+func colorIsFlashing(c Color, v Value) bool {
 	if c&ColorFlash != 0 {
 		return true
 	}
@@ -61,7 +61,7 @@ func (c Color) isFlashing(v Value) bool {
 	return false
 }
 
-func (c Color) toByte(flashingOff, flasher bool, v Value) byte {
+func colorToByte(c Color, flashingOff, flasher bool, v Value) byte {
 	if flashingOff && flasher {
 		if c != 0 {
 			return 0

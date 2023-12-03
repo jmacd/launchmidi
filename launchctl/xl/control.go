@@ -29,7 +29,7 @@ func controlRange(from, to Control) (r []Control) {
 	return
 }
 
-func (c Control) IsButton() bool {
+func controlIsButton(c Control) bool {
 	return c >= 24 && c < 48
 }
 
