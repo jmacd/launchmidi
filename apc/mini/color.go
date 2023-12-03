@@ -1,4 +1,4 @@
-package xl
+package mini
 
 const (
 	ColorBrightRed    Color = 0xc
@@ -49,26 +49,26 @@ func FlashUnknown(c Color) Color {
 	return c | ColorFlashIfUninitialized
 }
 
-func colorIsFlashing(c Color, v Value) bool {
-	if c&ColorFlash != 0 {
-		return true
-	}
-	if c&ColorFlashIfUninitialized != 0 {
-		if v == ValueUninitialized {
-			return true
-		}
-	}
-	return false
-}
+// func (c Color) isFlashing(v Value) bool {
+// 	if c&ColorFlash != 0 {
+// 		return true
+// 	}
+// 	if c&ColorFlashIfUninitialized != 0 {
+// 		if v == ValueUninitialized {
+// 			return true
+// 		}
+// 	}
+// 	return false
+// }
 
-func colorToByte(c Color, flashingOff, flasher bool, v Value) byte {
-	if flashingOff && flasher {
-		if c != 0 {
-			return 0
-		}
-		c = ColorDimYellow
-	}
-	red := (byte(c) & 0xc) >> 2
-	green := byte(c) & 0x3
-	return red + green<<4
-}
+// func (c Color) toByte(flashingOff, flasher bool, v Value) byte {
+// 	if flashingOff && flasher {
+// 		if c != 0 {
+// 			return 0
+// 		}
+// 		c = ColorDimYellow
+// 	}
+// 	red := (byte(c) & 0xc) >> 2
+// 	green := byte(c) & 0x3
+// 	return red + green<<4
+// }
